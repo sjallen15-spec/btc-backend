@@ -3,107 +3,105 @@ import cors from "cors";
 import fetch from "node-fetch";
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 
 app.use(cors());
 app.use(express.json());
 
-const BINANCE = "https://api.binance.com/api/v3";
+async function fetchWithTimeout(url, ms = 8000) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), ms);
+  try {
+    const r = await fetch(url, { signal: controller.signal });
+    return r;
+  } finally {
+    clearTimeout(id);
+  }
+}
 
-// ── Health check ──────────────────────────────────────────────
+function parseCandle(c) {
+  return {
+    time:      c.time * 1000,
+    open:      c.open,
+    high:      c.high,
+    low:       c.low,
+    close:     c.close,
+    volume:    c.volumefrom,
+    closeTime: (c.time + 900) * 1000,
+  };
+}
+
 app.get("/", (req, res) => {
   res.json({ status: "ok", time: new Date().toISOString() });
 });
 
-// ── Live spot price ───────────────────────────────────────────
 app.get("/price", async (req, res) => {
   try {
-    const r = await fetch(`${BINANCE}/ticker/price?symbol=BTCUSDT`);
-    const d = await r.json();
-    res.json({ symbol: d.symbol, price: parseFloat(d.price), time: Date.now() });
+    const r = await fetchWithTimeout(
+      "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
+    );
+    const data = await r.json();
+    res.json({ price: data.bitcoin.usd, time: Date.now() });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// ── OHLCV candles ─────────────────────────────────────────────
 app.get("/candles", async (req, res) => {
-  const interval = req.query.interval || "15m";
-  const limit    = Math.min(parseInt(req.query.limit) || 100, 500);
+  const limit = Math.min(parseInt(req.query.limit) || 100, 500);
   try {
-    const r = await fetch(`${BINANCE}/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`);
-    const raw = await r.json();
-    const candles = raw.map(c => ({
-      time:   Number(c[0]),
-      open:   parseFloat(c[1]),
-      high:   parseFloat(c[2]),
-      low:    parseFloat(c[3]),
-      close:  parseFloat(c[4]),
-      volume: parseFloat(c[5]),
-    }));
-    res.json(candles);
+    const r = await fetchWithTimeout(
+      `https://min-api.cryptocompare.com/data/v2/histominute?fsym=BTC&tsym=USD&limit=${limit}&aggregate=15`
+    );
+    const data = await r.json();
+    if (!data.Data?.Data || !Array.isArray(data.Data.Data)) {
+      throw new Error("Bad response from CryptoCompare");
+    }
+    res.json(data.Data.Data.map(parseCandle));
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// ── Main combined endpoint ────────────────────────────────────
-// Returns:
-//   price         — current live spot price
-//   betPrice      — open of the current 15m candle (the price you bet against)
-//   candleOpenTime — unix ms when the current 15m candle opened
-//   candleCloseTime — unix ms when the current 15m candle closes
-//   msUntilClose  — milliseconds remaining in this 15m window
-//   candles       — historical 15m OHLCV array (most recent last)
-//   source        — "binance"
 app.get("/btc", async (req, res) => {
-  const interval = req.query.interval || "15m";
-  const limit    = Math.min(parseInt(req.query.limit) || 100, 500);
+  const limit = Math.min(parseInt(req.query.limit) || 100, 500);
   try {
-    const [priceRes, candlesRes] = await Promise.all([
-      fetch(`${BINANCE}/ticker/price?symbol=BTCUSDT`),
-      fetch(`${BINANCE}/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`),
+    const [priceRes, candleRes] = await Promise.all([
+      fetchWithTimeout("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"),
+      fetchWithTimeout(`https://min-api.cryptocompare.com/data/v2/histominute?fsym=BTC&tsym=USD&limit=${limit}&aggregate=15`)
     ]);
-    const priceData   = await priceRes.json();
-    const candlesData = await candlesRes.json();
 
-    const livePrice = parseFloat(priceData.price);
-    const candles = candlesData.map(c => ({
-      time:      Number(c[0]),   // candle open timestamp
-      open:      parseFloat(c[1]),
-      high:      parseFloat(c[2]),
-      low:       parseFloat(c[3]),
-      close:     parseFloat(c[4]),
-      volume:    parseFloat(c[5]),
-      closeTime: Number(c[6]),   // candle close timestamp
-    }));
+    const priceData = await priceRes.json();
+    const candleData = await candleRes.json();
 
-    // The LAST candle is the currently-forming candle.
-    // Its open price is the exact 15-min boundary price — this is the BET PRICE.
-    const currentCandle = candles[candles.length - 1];
-    const betPrice      = currentCandle.open;          // price at the 15m mark
-    const candleOpenTime  = currentCandle.time;
-    const candleCloseTime = currentCandle.closeTime;
-    const msUntilClose  = Math.max(0, candleCloseTime - Date.now());
+    const livePrice = priceData.bitcoin.usd;
 
-    // Patch last candle's close with the live price so indicators use fresh data
-    currentCandle.close = livePrice;
-    currentCandle.high  = Math.max(currentCandle.high, livePrice);
-    currentCandle.low   = Math.min(currentCandle.low, livePrice);
+    if (!candleData.Data?.Data || !Array.isArray(candleData.Data.Data)) {
+      throw new Error("Bad candle data");
+    }
+
+    const candles = candleData.Data.Data.map(parseCandle);
+    const current = candles[candles.length - 1];
+    const betPrice = current.open;
+
+    current.close = livePrice;
+    current.high  = Math.max(current.high, livePrice);
+    current.low   = Math.min(current.low, livePrice);
 
     res.json({
-      price:          livePrice,
+      price:           livePrice,
       betPrice,
-      priceVsBet:     livePrice - betPrice,
-      priceVsBetPct:  ((livePrice - betPrice) / betPrice) * 100,
-      candleOpenTime,
-      candleCloseTime,
-      msUntilClose,
+      priceVsBet:      livePrice - betPrice,
+      priceVsBetPct:   ((livePrice - betPrice) / betPrice) * 100,
+      candleOpenTime:  current.time,
+      candleCloseTime: current.closeTime,
+      msUntilClose:    Math.max(0, current.closeTime - Date.now()),
       candles,
-      source: "binance",
-      serverTime: Date.now(),
+      source:          "cryptocompare",
+      serverTime:      Date.now(),
     });
   } catch (e) {
+    console.error("/btc error:", e.message);
     res.status(500).json({ error: e.message });
   }
 });
