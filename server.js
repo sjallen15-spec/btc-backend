@@ -19,6 +19,37 @@ async function fetchWithTimeout(url, ms = 8000) {
   }
 }
 
+async function getLivePrice() {
+  // Try CoinGecko first
+  try {
+    const r = await fetchWithTimeout(
+      "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
+    );
+    const data = await r.json();
+    if (data?.bitcoin?.usd) return data.bitcoin.usd;
+  } catch {}
+
+  // Fallback: CryptoCompare price
+  try {
+    const r = await fetchWithTimeout(
+      "https://min-api.cryptocompare.com/data/price?fsym=BTC&tsyms=USD"
+    );
+    const data = await r.json();
+    if (data?.USD) return data.USD;
+  } catch {}
+
+  // Fallback: Coinbase
+  try {
+    const r = await fetchWithTimeout(
+      "https://api.coinbase.com/v2/prices/BTC-USD/spot"
+    );
+    const data = await r.json();
+    if (data?.data?.amount) return parseFloat(data.data.amount);
+  } catch {}
+
+  throw new Error("All price sources failed");
+}
+
 function parseCandle(c) {
   return {
     time:      c.time * 1000,
@@ -37,11 +68,8 @@ app.get("/", (req, res) => {
 
 app.get("/price", async (req, res) => {
   try {
-    const r = await fetchWithTimeout(
-      "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
-    );
-    const data = await r.json();
-    res.json({ price: data.bitcoin.usd, time: Date.now() });
+    const price = await getLivePrice();
+    res.json({ price, time: Date.now() });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -66,15 +94,12 @@ app.get("/candles", async (req, res) => {
 app.get("/btc", async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit) || 100, 500);
   try {
-    const [priceRes, candleRes] = await Promise.all([
-      fetchWithTimeout("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"),
+    const [livePrice, candleRes] = await Promise.all([
+      getLivePrice(),
       fetchWithTimeout(`https://min-api.cryptocompare.com/data/v2/histominute?fsym=BTC&tsym=USD&limit=${limit}&aggregate=15`)
     ]);
 
-    const priceData = await priceRes.json();
     const candleData = await candleRes.json();
-
-    const livePrice = priceData.bitcoin.usd;
 
     if (!candleData.Data?.Data || !Array.isArray(candleData.Data.Data)) {
       throw new Error("Bad candle data");
@@ -109,4 +134,3 @@ app.get("/btc", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`BTC backend running on port ${PORT}`);
 });
- 
