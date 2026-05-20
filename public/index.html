@@ -15,8 +15,7 @@
 </head>
 <body>
   <div id="root"></div>
-  <script type="text/babel" data-type="module">
-
+  <script type="text/babel">
 // ═══════════════════════════════════════════════════════════════
 // CONFIG
 // ═══════════════════════════════════════════════════════════════
@@ -55,27 +54,27 @@ function fmtDate(ms) {
 // ═══════════════════════════════════════════════════════════════
 async function loadLog() {
   try {
-    const r = await window.storage.get(LOG_KEY);
-    return r ? JSON.parse(r.value) : [];
+    const v = localStorage.getItem(LOG_KEY);
+    return v ? JSON.parse(v) : [];
   } catch { return []; }
 }
 
 async function saveLog(log) {
   try {
-    await window.storage.set(LOG_KEY, JSON.stringify(log));
+    localStorage.setItem(LOG_KEY, JSON.stringify(log));
   } catch(e) { console.error("Storage save failed:", e); }
 }
 
 async function loadStreak() {
   try {
-    const r = await window.storage.get(STREAK_KEY);
-    return r ? JSON.parse(r.value) : { wins:0, losses:0 };
+    const v = localStorage.getItem(STREAK_KEY);
+    return v ? JSON.parse(v) : { wins:0, losses:0 };
   } catch { return { wins:0, losses:0 }; }
 }
 
 async function saveStreak(streak) {
   try {
-    await window.storage.set(STREAK_KEY, JSON.stringify(streak));
+    localStorage.setItem(STREAK_KEY, JSON.stringify(streak));
   } catch {}
 }
 
