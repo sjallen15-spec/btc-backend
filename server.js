@@ -5,7 +5,7 @@ import fetch from "node-fetch";
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-app.use(cors());
+app.use(cors({ origin: "*" }));
 app.use(express.json());
 
 async function fetchWithTimeout(url, ms = 8000) {
