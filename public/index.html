@@ -28,7 +28,7 @@ const STREAK_KEY = "btc_streak";
 // ── TELEGRAM ── Fill in after setup ──
 const TG_BOT_TOKEN = ""; // e.g. "7123456789:AAFxxxxxx"
 const TG_CHAT_ID   = ""; // e.g. "123456789"
-const TG_MIN_SCORE = 6;  // only notify when score >= this
+const TG_MIN_SCORE = 7;  // only notify when score >= this (optimized)
 
 // ═══════════════════════════════════════════════════════════════
 // 15-MINUTE WINDOW UTILITIES
@@ -181,9 +181,29 @@ function runEngine(candles, betPrice, livePrice, streak) {
   let rawDir=bv>=2&&bvD===0?"UP":bvD>=2&&bv===0?"DOWN":"MIXED";
   let revBlock=false;
   if(rawDir==="UP"&&st.trend==="DOWN"&&livePrice<=st.prevSwingHigh){revBlock=true;warnings.push("Reversal filter: lower high not broken");}
+  // ── OPTIMIZED RULES (based on backtest analysis) ──
+  // Score 6 had 14% win rate — skip it
+  // Score 4 had 83% win rate — include as MEDIUM
+  // UP signals in non-UP trend had <33% win rate — block them
+  // HIGH threshold raised to score>=7
   let signal="NO BET",confidence="LOW";
-  if(score>=6&&rawDir!=="MIXED"&&!revBlock){signal=rawDir;confidence="HIGH";}
-  else if(score>=4&&rawDir!=="MIXED"&&!revBlock){signal=rawDir;confidence="MEDIUM";}
+  
+  // Block UP signals unless trend confirms
+  const upBlocked = rawDir==="UP" && st.trend!=="UP";
+  
+  if(score>=7&&rawDir!=="MIXED"&&!revBlock&&!upBlocked){
+    signal=rawDir;confidence="HIGH";
+  } else if((score===4||score===5)&&rawDir!=="MIXED"&&!revBlock&&!upBlocked){
+    signal=rawDir;confidence="MEDIUM";
+  } else if(score>=8&&rawDir!=="MIXED"&&!revBlock){
+    // Perfect score overrides UP block
+    signal=rawDir;confidence="HIGH";
+  }
+  
+  // DOWN bias: lower threshold for DOWN signals in DOWN trend
+  if(signal==="NO BET"&&rawDir==="DOWN"&&st.trend==="DOWN"&&score>=4&&!revBlock){
+    signal="DOWN";confidence="MEDIUM";
+  }
   let betSize=0;
   if(signal!=="NO BET"&&streak.losses<4){
     betSize=streak.losses===3?2:streak.losses===2?3:streak.wins>=3?6:streak.wins===2?5:4;
