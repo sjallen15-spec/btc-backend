@@ -26,8 +26,8 @@ const API_BASE   = "https://btc-backend-production-0738.up.railway.app/api";
 const LOG_KEY    = "btc_trade_log";
 const STREAK_KEY = "btc_streak";
 // ── TELEGRAM ── Fill in after setup ──
-const TG_BOT_TOKEN = "7998975335:AAFptLQvgai5uPvojihTmtqgYdgaozhn5Ug";
-const TG_CHAT_ID   = "8632716847"; // e.g. "123456789"
+const TG_BOT_TOKEN = ""; // e.g. "7123456789:AAFxxxxxx"
+const TG_CHAT_ID   = ""; // e.g. "123456789"
 const TG_MIN_SCORE = 6;  // only notify when score >= this
 
 // ═══════════════════════════════════════════════════════════════
@@ -481,6 +481,31 @@ function BacktestTab() {
                 </div>
               </div>
             ))}
+          </div>
+
+          {/* EXPORT BUTTON */}
+          <div className="card" style={{marginBottom:12}}>
+            <button
+              className="btn"
+              style={{color:GREEN,borderColor:`${GREEN}55`,padding:"12px 24px",fontSize:13,width:"100%"}}
+              onClick={()=>{
+                const headers = ["time","date","signal","confidence","score","trend","openPrice","closePrice","nextClose","actualDir","signalCorrect","betPlaced"];
+                const rows = filtered.map(r => [
+                  fmtTime(r.time), fmtDate(r.time), r.signal, r.confidence, r.score, r.trend,
+                  r.openPrice, r.closePrice, r.nextClose, r.actualDir,
+                  r.signalCorrect===null?"N/A":r.signalCorrect?"TRUE":"FALSE",
+                  r.betPlaced
+                ].join(","));
+                const csv = [headers.join(","), ...rows].join("\n");
+                const blob = new Blob([csv],{type:"text/csv"});
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href=url; a.download=`btc_backtest_${Date.now()}.csv`; a.click();
+                URL.revokeObjectURL(url);
+              }}
+            >
+              ↓ EXPORT BACKTEST CSV ({filtered.length} rows)
+            </button>
           </div>
 
           {/* RECENT SIGNALS TABLE */}
