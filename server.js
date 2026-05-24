@@ -75,13 +75,23 @@ function parseCandle(c) {
   };
 }
 
-async function getCandles(limit = 100) {
+async function getCandles(limit = 100, interval = "15m") {
+  // interval: "1m" = 1-minute candles, "15m" = 15-minute aggregated
+  const aggregate = interval === "1m" ? 1 : 15;
   const r = await fetchWithTimeout(
-    `https://min-api.cryptocompare.com/data/v2/histominute?fsym=BTC&tsym=USD&limit=${limit}&aggregate=15`
+    `https://min-api.cryptocompare.com/data/v2/histominute?fsym=BTC&tsym=USD&limit=${limit}&aggregate=${aggregate}`
   );
   const data = await r.json();
   if (!data.Data?.Data || !Array.isArray(data.Data.Data)) throw new Error("Bad candle data");
-  return data.Data.Data.map(parseCandle);
+  return data.Data.Data.map(c => ({
+    time:      c.time * 1000,
+    open:      c.open,
+    high:      c.high,
+    low:       c.low,
+    close:     c.close,
+    volume:    c.volumefrom,
+    closeTime: (c.time + (aggregate * 60)) * 1000,
+  }));
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -166,25 +176,26 @@ function msUntilNextBoundary() {
   return MS15 - (now % MS15);
 }
 
-let lastSignalWindow = 0;
+let lastSignal = "NO BET";
+let lastScore = 0;
 
 async function runSignalAndNotify() {
-  const now = Date.now();
-  const windowOpen = Math.floor(now / MS15) * MS15;
-  if (windowOpen === lastSignalWindow) return; // already ran this window
-  lastSignalWindow = windowOpen;
-
   console.log(`[${new Date().toISOString()}] Running signal check...`);
   try {
     const [livePrice, candles] = await Promise.all([getLivePrice(), getCandles(100)]);
     const betPrice = candles[candles.length-1].open;
     const sig = runEngine(candles, betPrice, livePrice);
 
-    console.log(`Signal: ${sig.signal} | Score: ${sig.score} | Confidence: ${sig.confidence}`);
+    console.log(`Signal: ${sig.signal} | Score: ${sig.score} | Confidence: ${sig.confidence} | Last: ${lastSignal}`);
 
-    if (sig.signal !== "NO BET" && sig.score >= TG_MIN_SCORE) {
+    const signalChanged = sig.signal !== lastSignal;
+    const scoreChanged  = sig.score !== lastScore && sig.signal !== "NO BET";
+
+    if (sig.signal !== "NO BET" && sig.score >= TG_MIN_SCORE && (signalChanged || scoreChanged)) {
       const arrow = sig.signal === "UP" ? "🟢" : "🔴";
-      const msg = `${arrow} *BTC SIGNAL: ${sig.signal}*\n\n` +
+      const changeNote = signalChanged && lastSignal !== "NO BET"
+        ? `\n⚠️ _Changed from ${lastSignal} → ${sig.signal}_` : "";
+      const msg = `${arrow} *BTC SIGNAL: ${sig.signal}*${changeNote}\n\n` +
         `Score: ${sig.score}/8 | Confidence: ${sig.confidence}\n` +
         `Trend: ${sig.trend}\n` +
         `Live Price: $${livePrice.toLocaleString()}\n` +
@@ -194,20 +205,18 @@ async function runSignalAndNotify() {
       await sendTelegram(msg);
       console.log("Telegram alert sent!");
     }
+
+    lastSignal = sig.signal;
+    lastScore  = sig.score;
   } catch(e) {
     console.error("Signal check failed:", e.message);
   }
 }
 
-// Schedule: check every minute, fire on 15m boundary
-setInterval(() => {
-  const msLeft = msUntilNextBoundary();
-  if (msLeft < 60000) { // within last minute of window
-    setTimeout(runSignalAndNotify, msLeft + 2000); // fire 2s after boundary
-  }
-}, 60000);
+// Check every minute — notify whenever signal or score changes
+setInterval(runSignalAndNotify, 60000);
 
-// Also run once on startup
+// Run once on startup
 setTimeout(runSignalAndNotify, 3000);
 
 // ═══════════════════════════════════════════════════════════════
@@ -223,9 +232,10 @@ app.get("/api/price", async (req, res) => {
 });
 
 app.get("/api/candles", async (req, res) => {
-  const limit = Math.min(parseInt(req.query.limit) || 100, 1500);
+  const limit = Math.min(parseInt(req.query.limit) || 100, 2016);
+  const interval = req.query.interval || "15m";
   try {
-    const candles = await getCandles(limit);
+    const candles = await getCandles(limit, interval);
     res.json(candles);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

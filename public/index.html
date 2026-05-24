@@ -26,8 +26,8 @@ const API_BASE   = "https://btc-backend-production-0738.up.railway.app/api";
 const LOG_KEY    = "btc_trade_log";
 const STREAK_KEY = "btc_streak";
 // ── TELEGRAM ── Fill in after setup ──
-const TG_BOT_TOKEN = "7998975335:AAFptLQvgai5uPvojihTmtqgYdgaozhn5Ug";
-const TG_CHAT_ID   = "8632716847";
+const TG_BOT_TOKEN = ""; // e.g. "7123456789:AAFxxxxxx"
+const TG_CHAT_ID   = ""; // e.g. "123456789"
 const TG_MIN_SCORE = 4;  // notify on any score >= 4
 
 // ═══════════════════════════════════════════════════════════════
@@ -181,27 +181,35 @@ function runEngine(candles, betPrice, livePrice, streak) {
   let rawDir=bv>=2&&bvD===0?"UP":bvD>=2&&bv===0?"DOWN":"MIXED";
   let revBlock=false;
   if(rawDir==="UP"&&st.trend==="DOWN"&&livePrice<=st.prevSwingHigh){revBlock=true;warnings.push("Reversal filter: lower high not broken");}
-  // ── OPTIMIZED RULES (based on backtest analysis) ──
-  // Score 6 had 14% win rate — skip it
-  // Score 4 had 83% win rate — include as MEDIUM
-  // UP signals in non-UP trend had <33% win rate — block them
-  // HIGH threshold raised to score>=7
+  // ── OPTIMIZED RULES v2 (backtest-driven) ──
+  // Key findings:
+  // - Score 4: 75% win rate, Score 5 in CHOP: 62%, Score 7: 100%
+  // - Score 5+6 in DOWN trend: poor (25-40%) — counterintuitive, skip
+  // - UP signals: 0% win rate — BLOCK ALL UP signals
+  // - Blocked score>=5 windows: 69% would have been correct as DOWN bets
+  // - Score>=4 with any trend: 60% go DOWN — lean DOWN on ambiguity
   let signal="NO BET",confidence="LOW";
-  
-  // Block UP signals unless trend confirms
-  const upBlocked = rawDir==="UP" && st.trend!=="UP";
-  
-  if(score>=7&&rawDir!=="MIXED"&&!revBlock&&!upBlocked){
-    signal=rawDir;confidence="HIGH";
-  } else if((score===4||score===5)&&rawDir!=="MIXED"&&!revBlock&&!upBlocked){
-    signal=rawDir;confidence="MEDIUM";
-  } else if(score>=8&&rawDir!=="MIXED"&&!revBlock){
-    // Perfect score overrides UP block
-    signal=rawDir;confidence="HIGH";
+
+  // RULE 1: Block ALL UP signals — data shows 0% win rate
+  const upBlocked = rawDir==="UP";
+
+  // RULE 2: Score 7+ = HIGH confidence DOWN
+  if(score>=7&&rawDir==="DOWN"&&!revBlock){
+    signal="DOWN";confidence="HIGH";
   }
+  // RULE 3: Score 4 = MEDIUM (75% win rate in data)
+  else if(score===4&&rawDir==="DOWN"&&!revBlock){
+    signal="DOWN";confidence="MEDIUM";
+  }
+  // RULE 4: Score 5 in CHOP or UP trend = MEDIUM DOWN (62-75% actual DOWN)
+  else if(score===5&&rawDir==="DOWN"&&st.trend!=="DOWN"&&!revBlock){
+    signal="DOWN";confidence="MEDIUM";
+  }
+  // RULE 5: Score 5 in DOWN trend — skip (only 25% win rate)
+  // RULE 6: Score 6 — skip (25% win rate across the board)
   
-  // DOWN bias: lower threshold for DOWN signals in DOWN trend
-  if(signal==="NO BET"&&rawDir==="DOWN"&&st.trend==="DOWN"&&score>=4&&!revBlock){
+  // RULE 7: High score blocked windows — bet DOWN if score>=5 and indicators lean down
+  if(signal==="NO BET"&&score>=5&&!revBlock&&bvD>=2){
     signal="DOWN";confidence="MEDIUM";
   }
   let betSize=0;
@@ -219,46 +227,148 @@ function runEngine(candles, betPrice, livePrice, streak) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// BACKTEST ENGINE
+// BACKTEST ENGINE v2 — majority vote across full window
 // ═══════════════════════════════════════════════════════════════
 async function runBacktest(onProgress) {
-  onProgress("Fetching 2 weeks of candles...");
-  let candles = [];
+  onProgress("Fetching 1-minute candles for detailed backtest...");
+  let candles1m = [];
   try {
-    const r = await fetch(`${API_BASE}/candles?interval=15m&limit=1344`);
+    // Fetch 1-minute candles — 2016 = ~2 weeks at 1min granularity (CryptoCompare max per call)
+    const r = await fetch(`${API_BASE}/candles?interval=1m&limit=2016`);
     if (!r.ok) throw new Error("Backend error");
-    candles = await r.json();
+    candles1m = await r.json();
   } catch {
     onProgress("Backend failed — using synthetic candles");
     const s = generateSynthetic(77000, 200);
-    candles = s.candles;
+    // Simulate 1-min from 15-min by splitting each candle into 15 sub-candles
+    candles1m = [];
+    for (const c of s.candles) {
+      for (let i = 0; i < 15; i++) {
+        const t = c.time + i * 60000;
+        const p = c.open + (c.close - c.open) * (i / 14);
+        candles1m.push({ time: t, open: p, high: p + 10, low: p - 10, close: p, volume: c.volume / 15, closeTime: t + 60000 });
+      }
+    }
   }
-  if (candles.length < 30) throw new Error("Not enough candle data");
-  onProgress(`Running engine on ${candles.length} candles...`);
+
+  if (candles1m.length < 30) throw new Error("Not enough candle data");
+
+  // Group 1-minute candles into 15-minute windows
+  const MS15 = 15 * 60 * 1000;
+  const windowMap = {};
+  for (const c of candles1m) {
+    const windowKey = Math.floor(c.time / MS15) * MS15;
+    if (!windowMap[windowKey]) windowMap[windowKey] = [];
+    windowMap[windowKey].push(c);
+  }
+
+  const windowKeys = Object.keys(windowMap).map(Number).sort();
+  onProgress(`Found ${windowKeys.length} 15-minute windows. Running majority vote engine...`);
+
   const results = [];
-  const WARMUP = 26;
-  for (let i = WARMUP; i < candles.length - 1; i++) {
-    const slice = candles.slice(0, i + 1);
-    const current = slice[slice.length - 1];
-    const next = candles[i + 1];
-    const sig = runEngine(slice, current.open, current.close, { wins: 0, losses: 0 });
-    const actualDir = next.close > current.close ? "UP" : "DOWN";
-    const signalCorrect = sig.signal !== "NO BET" ? sig.signal === actualDir : null;
+  const WARMUP_WINDOWS = 3; // need at least 3 prior windows for indicators
+
+  for (let wi = WARMUP_WINDOWS; wi < windowKeys.length - 1; wi++) {
+    const windowStart = windowKeys[wi];
+    const windowCandles = windowMap[windowStart];
+    const nextWindowStart = windowKeys[wi + 1];
+    const nextCandles = windowMap[nextWindowStart];
+    if (!windowCandles || windowCandles.length < 3) continue;
+    if (!nextCandles || nextCandles.length < 1) continue;
+
+    // Build cumulative 15m candle history up to this window using prior windows
+    const prior15mCandles = [];
+    for (let pi = 0; pi < wi; pi++) {
+      const pKey = windowKeys[pi];
+      const pCandles = windowMap[pKey];
+      if (!pCandles || pCandles.length === 0) continue;
+      const opens  = pCandles.map(c => c.open);
+      const closes = pCandles.map(c => c.close);
+      const highs  = pCandles.map(c => c.high);
+      const lows   = pCandles.map(c => c.low);
+      prior15mCandles.push({
+        time: pKey,
+        open: opens[0],
+        high: Math.max(...highs),
+        low: Math.min(...lows),
+        close: closes[closes.length - 1],
+        volume: pCandles.reduce((s, c) => s + c.volume, 0),
+        closeTime: pKey + MS15,
+      });
+    }
+    if (prior15mCandles.length < 26) continue;
+
+    // Run signal at every 1-minute mark within this window
+    const upVotes = [], downVotes = [], noVotes = [];
+    const minuteSignals = [];
+
+    for (let mi = 2; mi < windowCandles.length; mi++) {
+      // Build slice: all prior 15m candles + current window candles up to this minute
+      const currentMinCandles = windowCandles.slice(0, mi + 1);
+      // Create a synthetic "current" 15m candle from the 1-min data so far
+      const synthCurrent = {
+        time: windowStart,
+        open: currentMinCandles[0].open,
+        high: Math.max(...currentMinCandles.map(c => c.high)),
+        low: Math.min(...currentMinCandles.map(c => c.low)),
+        close: currentMinCandles[currentMinCandles.length - 1].close,
+        volume: currentMinCandles.reduce((s, c) => s + c.volume, 0),
+        closeTime: windowStart + MS15,
+      };
+      const slice = [...prior15mCandles, synthCurrent];
+      const betPrice = currentMinCandles[0].open;
+      const livePrice = synthCurrent.close;
+      const sig = runEngine(slice, betPrice, livePrice, { wins: 0, losses: 0 });
+      minuteSignals.push({ minute: mi, signal: sig.signal, score: sig.score, confidence: sig.confidence });
+      if (sig.signal === "UP") upVotes.push(sig);
+      else if (sig.signal === "DOWN") downVotes.push(sig);
+      else noVotes.push(sig);
+    }
+
+    // Majority vote
+    const totalVotes = upVotes.length + downVotes.length + noVotes.length;
+    let majoritySignal = "NO BET";
+    let majorityConfidence = "LOW";
+    let avgScore = 0;
+    let voteBreakdown = { up: upVotes.length, down: downVotes.length, noBet: noVotes.length };
+
+    if (upVotes.length > downVotes.length && upVotes.length > noVotes.length) {
+      majoritySignal = "UP";
+      avgScore = Math.round(upVotes.reduce((s, v) => s + v.score, 0) / upVotes.length);
+      majorityConfidence = upVotes.filter(v => v.confidence === "HIGH").length > upVotes.length / 2 ? "HIGH" : "MEDIUM";
+    } else if (downVotes.length > upVotes.length && downVotes.length >= noVotes.length) {
+      majoritySignal = "DOWN";
+      avgScore = Math.round(downVotes.reduce((s, v) => s + v.score, 0) / downVotes.length);
+      majorityConfidence = downVotes.filter(v => v.confidence === "HIGH").length > downVotes.length / 2 ? "HIGH" : "MEDIUM";
+    } else {
+      avgScore = Math.round(minuteSignals.reduce((s, v) => s + v.score, 0) / minuteSignals.length);
+    }
+
+    // Actual result: did price go up or down from window open to next window open?
+    const windowOpen  = windowCandles[0].open;
+    const windowClose = nextCandles[0].open; // next window's open = this window's effective close
+    const actualDir   = windowClose > windowOpen ? "UP" : "DOWN";
+    const signalCorrect = majoritySignal !== "NO BET" ? majoritySignal === actualDir : null;
+
     results.push({
-      time: current.time,
-      signal: sig.signal,
-      confidence: sig.confidence,
-      score: sig.score,
-      trend: sig.trend,
-      openPrice: current.open,
-      closePrice: current.close,
-      nextClose: next.close,
+      time: windowStart,
+      signal: majoritySignal,
+      confidence: majorityConfidence,
+      score: avgScore,
+      trend: minuteSignals[minuteSignals.length - 1]?.trend || "CHOP",
+      openPrice: windowOpen,
+      closePrice: windowClose,
+      nextClose: windowClose,
       actualDir,
       signalCorrect,
-      betPlaced: sig.signal !== "NO BET",
+      betPlaced: majoritySignal !== "NO BET",
+      voteBreakdown,
+      totalMinutes: windowCandles.length,
     });
-    if (i % 50 === 0) onProgress(`Processed ${i}/${candles.length} candles...`);
+
+    if (wi % 10 === 0) onProgress(`Processed ${wi}/${windowKeys.length} windows...`);
   }
+
   return results;
 }
 
@@ -509,12 +619,14 @@ function BacktestTab() {
               className="btn"
               style={{color:GREEN,borderColor:`${GREEN}55`,padding:"12px 24px",fontSize:13,width:"100%"}}
               onClick={()=>{
-                const headers = ["time","date","signal","confidence","score","trend","openPrice","closePrice","nextClose","actualDir","signalCorrect","betPlaced"];
+                const headers = ["time","date","signal","confidence","score","trend","openPrice","closePrice","nextClose","actualDir","signalCorrect","betPlaced","votesUp","votesDown","votesNoBet","totalMinutes"];
                 const rows = filtered.map(r => [
                   fmtTime(r.time), fmtDate(r.time), r.signal, r.confidence, r.score, r.trend,
                   r.openPrice, r.closePrice, r.nextClose, r.actualDir,
                   r.signalCorrect===null?"N/A":r.signalCorrect?"TRUE":"FALSE",
-                  r.betPlaced
+                  r.betPlaced,
+                  r.voteBreakdown?.up??0, r.voteBreakdown?.down??0, r.voteBreakdown?.noBet??0,
+                  r.totalMinutes??1
                 ].join(","));
                 const csv = [headers.join(","), ...rows].join("\n");
                 const blob = new Blob([csv],{type:"text/csv"});
@@ -533,11 +645,22 @@ function BacktestTab() {
             <div style={{fontSize:9,color:FG4,letterSpacing:".15em",marginBottom:12}}>LAST 20 SIGNALS</div>
             <div style={{overflowX:"auto"}}>
               {signaled.slice(-20).reverse().map((r,i)=>(
-                <div key={i} style={{display:"grid",gridTemplateColumns:"80px 60px 50px 50px 1fr",gap:8,padding:"8px 0",borderBottom:`1px solid ${BDR}`,fontSize:11,alignItems:"center"}}>
+                <div key={i} style={{display:"grid",gridTemplateColumns:"70px 55px 45px 45px 80px 1fr",gap:6,padding:"8px 0",borderBottom:`1px solid ${BDR}`,fontSize:11,alignItems:"center"}}>
                   <div style={{color:FG3,fontSize:10}}>{fmtTime(r.time)}</div>
                   <div style={{fontFamily:"'Bebas Neue'",fontSize:16,color:r.signal==="UP"?GREEN:RED}}>{r.signal}</div>
                   <div style={{color:r.score>=6?GREEN:r.score<=3?RED:AMBER}}>{r.score}/8</div>
                   <div style={{fontSize:10,color:FG3}}>{r.confidence.slice(0,3)}</div>
+                  <div style={{fontSize:9,color:FG4}}>
+                    {r.voteBreakdown ? (
+                      <span>
+                        <span style={{color:GREEN}}>▲{r.voteBreakdown.up}</span>
+                        {" / "}
+                        <span style={{color:RED}}>▼{r.voteBreakdown.down}</span>
+                        {" / "}
+                        <span style={{color:FG4}}>–{r.voteBreakdown.noBet}</span>
+                      </span>
+                    ) : "—"}
+                  </div>
                   <div style={{fontSize:12,color:r.signalCorrect?GREEN:RED,fontWeight:700}}>
                     {r.signalCorrect ? "✓ CORRECT" : "✗ WRONG"}
                     <span style={{color:FG4,fontSize:10,fontWeight:400,marginLeft:8}}>{r.actualDir}</span>
