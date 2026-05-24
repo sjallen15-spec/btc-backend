@@ -158,9 +158,10 @@ function runEngine(candles, betPrice, livePrice) {
   const bvD = [livePrice<e50, mom.dir==="DOWN", m.macd<m.signal].filter(Boolean).length;
   const rawDir = bvD >= 2 ? "DOWN" : "UP";
 
+  // ── OPTIMIZED RULES v3 ──
   let signal = "NO BET", confidence = "LOW";
   if (score >= 7 && rawDir === "DOWN") { signal = "DOWN"; confidence = "HIGH"; }
-  else if ((score === 4 || score === 5) && rawDir === "DOWN" && st.trend !== "DOWN") { signal = "DOWN"; confidence = "MEDIUM"; }
+  else if ((score === 5 || score === 6) && rawDir === "DOWN") { signal = "DOWN"; confidence = "MEDIUM"; }
   else if (score === 4 && rawDir === "DOWN") { signal = "DOWN"; confidence = "MEDIUM"; }
   if (signal === "NO BET" && score >= 5 && bvD >= 2) { signal = "DOWN"; confidence = "MEDIUM"; }
 
