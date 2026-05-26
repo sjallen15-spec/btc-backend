@@ -153,10 +153,13 @@ function calcMomentum(candles) {
   return { sameDir: d1===d2, expanding: Math.abs(a.close-a.open) > candles.slice(-6,-1).reduce((s,c)=>s+Math.abs(c.close-c.open),0)/5, dir: d1 };
 }
 
-function runEngine(candles, betPrice, livePrice) {
+function runEngine(candles, betPrice, livePrice, candles1m) {
   const closes = candles.map(c => c.close);
   const e50arr = emaArr(closes, 50), e50 = e50arr[e50arr.length-1];
-  const m = calcMACD(closes), at = calcATR(candles), mom = calcMomentum(candles), st = calcStructure(candles);
+  const m = calcMACD(closes), at = calcATR(candles);
+  // Use 1m candles for momentum/structure if available
+  const candlesForMom = (candles1m && candles1m.length >= 5) ? candles1m : candles;
+  const mom = calcMomentum(candlesForMom), st = calcStructure(candlesForMom);
 
   let score = 0; const reasoning = [];
   livePrice > e50 ? (score++, reasoning.push("Price above EMA50")) : reasoning.push("Price below EMA50");
@@ -209,17 +212,21 @@ async function runSignalAndNotify() {
     const msUntilClose = currentWindowClose - now;
     const minsLeft = Math.round(msUntilClose / 60000);
 
-    // Fetch 100 1-min candles — enough history for EMA50, MACD, ATR
-    const [livePrice, candles1m] = await Promise.all([getLivePrice(), getCandles(100, "1m")]);
-    // Update last candle to live price so indicators reflect right now
-    if (candles1m.length > 0) candles1m[candles1m.length-1].close = livePrice;
-    const candles = candles1m;
+    // Multi-timeframe: 15m for MACD/EMA/ATR, 1m for trend/momentum
+    const [livePrice, candles15m, candles1m] = await Promise.all([
+      getLivePrice(),
+      getCandles(100, "15m"),
+      getCandles(30, "1m")
+    ]);
+    // Update last candles to live price
+    if (candles15m.length > 0) candles15m[candles15m.length-1].close = livePrice;
+    if (candles1m.length > 0)  candles1m[candles1m.length-1].close   = livePrice;
 
     // Bet price = open of current 15m window
-    const windowCandles = candles1m.filter(c => c.time >= currentWindowOpen);
-    const betPrice = windowCandles.length > 0 ? windowCandles[0].open : livePrice;
+    const windowCandles1m = candles1m.filter(c => c.time >= currentWindowOpen);
+    const betPrice = windowCandles1m.length > 0 ? windowCandles1m[0].open : livePrice;
 
-    const sig = runEngine(candles, betPrice, livePrice);
+    const sig = runEngine(candles15m, betPrice, livePrice, null, candles1m);
 
     console.log(`Signal: ${sig.signal} | Score: ${sig.score} | Confidence: ${sig.confidence} | ${minsLeft}m left | Last: ${lastSignal}`);
 

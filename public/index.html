@@ -88,40 +88,43 @@ async function saveStreak(streak) {
 // DATA FETCH
 // ═══════════════════════════════════════════════════════════════
 async function fetchBTCData() {
-  // Fetch 100 1-minute candles:
-  // - Last 100 mins gives enough history for EMA50, MACD (needs 26+), ATR
-  // - Signal is informed by all 100 candles for indicator accuracy
-  // - But the "lookback window" driving the signal is the last 15 mins
-  const [btcRes, candleRes] = await Promise.all([
+  // Multi-timeframe fetch:
+  // - 15m candles (100): for MACD, EMA50, ATR — need bigger candles for meaningful values
+  // - 1m candles (30): for recent trend/momentum — captures what happened in last 15 mins
+  const [btcRes, candles15mRes, candles1mRes] = await Promise.all([
     fetch(`${API_BASE}/price`),
-    fetch(`${API_BASE}/candles?interval=1m&limit=100`)
+    fetch(`${API_BASE}/candles?interval=15m&limit=100`),
+    fetch(`${API_BASE}/candles?interval=1m&limit=30`)
   ]);
-  if (!btcRes.ok || !candleRes.ok) throw new Error("Backend error");
+  if (!btcRes.ok) throw new Error("Backend error");
   const priceData = await btcRes.json();
-  const allCandles1m = await candleRes.json();
+  const candles15m = candles15mRes.ok ? await candles15mRes.json() : [];
+  const candles1m  = candles1mRes.ok  ? await candles1mRes.json()  : [];
 
   const now = Date.now();
   const currentWindowOpen  = current15mOpenTime(now);
   const currentWindowClose = current15mCloseTime(now);
 
   // Bet price = open of current 15m window
-  const windowCandles = allCandles1m.filter(c => c.time >= currentWindowOpen);
-  const betPrice = windowCandles.length > 0 ? windowCandles[0].open : priceData.price;
+  const windowCandles1m = candles1m.filter(c => c.time >= currentWindowOpen);
+  const betPrice = windowCandles1m.length > 0
+    ? windowCandles1m[0].open
+    : (candles15m.length > 0 ? candles15m[candles15m.length-1].open : priceData.price);
 
-  // Update last candle close to live price so indicators reflect right now
-  if (allCandles1m.length > 0) {
-    allCandles1m[allCandles1m.length - 1].close = priceData.price;
-  }
+  // Update last 15m candle to live price
+  if (candles15m.length > 0) candles15m[candles15m.length-1].close = priceData.price;
+  // Update last 1m candle to live price
+  if (candles1m.length > 0)  candles1m[candles1m.length-1].close   = priceData.price;
 
   return {
     price: priceData.price,
     betPrice,
-    candles: allCandles1m, // full 100 1-min candles for indicator accuracy
+    candles: candles15m,    // 15m candles for MACD/EMA/ATR
+    candles1m,              // 1m candles for trend/momentum
     candleOpenTime: currentWindowOpen,
     candleCloseTime: currentWindowClose,
     msUntilClose: currentWindowClose - now,
     source: "cryptocompare",
-    lookbackMinutes: 100,
   };
 }
 
@@ -183,10 +186,14 @@ function calcLocation(candles,st) {
 // ═══════════════════════════════════════════════════════════════
 // SCORING ENGINE
 // ═══════════════════════════════════════════════════════════════
-function runEngine(candles, betPrice, livePrice, streak) {
+function runEngine(candles, betPrice, livePrice, streak, candles1m) {
+  // Multi-timeframe: use 15m candles for MACD/EMA/ATR, 1m candles for trend/momentum
   const closes=candles.map(c=>c.close);
   const e50arr=emaArr(closes,50),e50=e50arr[e50arr.length-1];
-  const m=calcMACD(closes),at=calcATR(candles),mom=calcMomentum(candles),st=calcStructure(candles),loc=calcLocation(candles,st);
+  const m=calcMACD(closes),at=calcATR(candles);
+  // Use 1m candles for momentum/structure if available — captures recent 15 mins
+  const candlesForMom = (candles1m && candles1m.length >= 5) ? candles1m : candles;
+  const mom=calcMomentum(candlesForMom),st=calcStructure(candlesForMom),loc=calcLocation(candles,st);
   const priceVsBet=livePrice-betPrice,priceVsBetPct=(priceVsBet/betPrice)*100,candleDir=livePrice>=betPrice?"UP":"DOWN";
   let score=0; const reasoning=[],warnings=[],bd={};
   let ts=0;
@@ -312,22 +319,44 @@ async function runBacktest(onProgress) {
     if (!windowCandles || windowCandles.length < 3) continue;
     if (!nextCandles || nextCandles.length < 1) continue;
 
-    // Use 100 1-min candles PRIOR to this window for indicator history
-    // This mirrors exactly how the live signal works
-    const priorCandles1m = candles1m.filter(c => c.time < windowStart).slice(-100);
-    if (priorCandles1m.length < 30) continue; // need enough history for MACD
+    // Multi-timeframe backtest:
+    // - Build prior 15m candles from grouped windows for MACD/EMA/ATR
+    // - Use prior 1m candles for trend/momentum
+    const prior15mCandles = [];
+    for (let pi = Math.max(0, wi - 100); pi < wi; pi++) {
+      const pKey = windowKeys[pi];
+      const pCandles = windowMap[pKey];
+      if (!pCandles || pCandles.length === 0) continue;
+      prior15mCandles.push({
+        time: pKey,
+        open: pCandles[0].open,
+        high: Math.max(...pCandles.map(c=>c.high)),
+        low:  Math.min(...pCandles.map(c=>c.low)),
+        close: pCandles[pCandles.length-1].close,
+        volume: pCandles.reduce((s,c)=>s+c.volume,0),
+        closeTime: pKey + MS15,
+      });
+    }
+    if (prior15mCandles.length < 26) continue;
 
     // Run signal at every 1-minute mark within this window
     const upVotes = [], downVotes = [], noVotes = [];
     const minuteSignals = [];
 
     for (let mi = 0; mi < windowCandles.length; mi++) {
-      // Slice: 100 prior 1-min candles + current window candles up to this minute
       const currentMinCandles = windowCandles.slice(0, mi + 1);
-      const slice = [...priorCandles1m, ...currentMinCandles];
-      const betPrice = windowCandles[0].open; // window open price
-      const livePrice = currentMinCandles[currentMinCandles.length - 1].close;
-      const sig = runEngine(slice, betPrice, livePrice, { wins: 0, losses: 0 });
+      // Update last 15m candle close to current 1m price
+      const candlesFor15m = [...prior15mCandles];
+      if (candlesFor15m.length > 0) {
+        candlesFor15m[candlesFor15m.length-1] = {
+          ...candlesFor15m[candlesFor15m.length-1],
+          close: currentMinCandles[currentMinCandles.length-1].close
+        };
+      }
+      const betPrice  = windowCandles[0].open;
+      const livePrice = currentMinCandles[currentMinCandles.length-1].close;
+      // Pass 15m candles for MACD/EMA/ATR, 1m candles for trend/momentum
+      const sig = runEngine(candlesFor15m, betPrice, livePrice, { wins: 0, losses: 0 }, currentMinCandles);
       minuteSignals.push({ minute: mi, signal: sig.signal, score: sig.score, confidence: sig.confidence, trend: sig._meta?.st?.trend || "CHOP" });
       if (sig.signal === "UP") upVotes.push(sig);
       else if (sig.signal === "DOWN") downVotes.push(sig);
@@ -768,8 +797,8 @@ function BTCDecisionEngine() {
       setLoadMsg("Running scoring engine...");
       setSource(data.source);
       const sk = streak;
-      // Rolling 15-min lookback informs signal for current window
-      const out = runEngine(data.candles, data.betPrice, data.price, sk);
+      // Multi-timeframe: 15m for MACD/EMA/ATR, 1m for trend/momentum
+      const out = runEngine(data.candles, data.betPrice, data.price, sk, data.candles1m);
       out._meta.candleOpenTime  = data.candleOpenTime;
       out._meta.candleCloseTime = data.candleCloseTime;
       out._meta.msUntilClose    = data.msUntilClose;
