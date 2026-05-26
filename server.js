@@ -176,16 +176,20 @@ function runEngine(candles, betPrice, livePrice, candles1m) {
   const bvD  = [m.macd<0, mom.dir==="DOWN", st.trend==="DOWN", livePrice<e50].filter(Boolean).length;
   const rawDir = bv>=3?"UP":bvD>=3?"DOWN":bv>=2&&bvD===0?"UP":bvD>=2&&bv===0?"DOWN":"MIXED";
 
-  // ── OPTIMIZED RULES v4 ──
+  // ── OPTIMIZED RULES v5 ──
+  const downVoteAgreement = bvD / Math.max(bv + bvD, 1);
+  const upVoteAgreement   = bv   / Math.max(bv + bvD, 1);
   let signal = "NO BET", confidence = "LOW";
   // DOWN signals
   if (score >= 7 && bvD >= 2) { signal = "DOWN"; confidence = "HIGH"; }
-  else if ((score === 5 || score === 6) && bvD >= 2) { signal = "DOWN"; confidence = "MEDIUM"; }
-  else if (score === 4 && bvD >= 2 && rawDir === "DOWN") { signal = "DOWN"; confidence = "MEDIUM"; }
-  // UP signals (re-enabled - score 5: 91% UP, score 6: 100% UP)
-  if (signal === "NO BET" && score >= 6 && bv >= 2 && rawDir === "UP") { signal = "UP"; confidence = "HIGH"; }
-  else if (signal === "NO BET" && score === 5 && bv >= 2 && rawDir === "UP") { signal = "UP"; confidence = "MEDIUM"; }
-  else if (signal === "NO BET" && score === 4 && bv >= 2 && rawDir === "UP" && st.trend === "UP") { signal = "UP"; confidence = "MEDIUM"; }
+  else if (score === 6 && bvD >= 2 && rawDir === "DOWN") { signal = "DOWN"; confidence = "HIGH"; }
+  else if (score === 4 && bvD >= 2 && rawDir === "DOWN" && downVoteAgreement >= 0.6) { signal = "DOWN"; confidence = "MEDIUM"; }
+  // Score 5 BLOCKED — 29% win rate
+  // UP signals
+  if (signal === "NO BET" && score >= 7 && bv >= 2 && rawDir === "UP") { signal = "UP"; confidence = "HIGH"; }
+  else if (signal === "NO BET" && score === 6 && bv >= 2 && rawDir === "UP") { signal = "UP"; confidence = "HIGH"; }
+  else if (signal === "NO BET" && score === 5 && bv >= 2 && rawDir === "UP" && st.trend === "UP" && upVoteAgreement >= 0.6) { signal = "UP"; confidence = "MEDIUM"; }
+  else if (signal === "NO BET" && score === 4 && bv >= 2 && rawDir === "UP" && st.trend === "UP" && upVoteAgreement >= 0.6) { signal = "UP"; confidence = "MEDIUM"; }
 
   return { signal, confidence, score, trend: st.trend, reasoning };
 }
