@@ -185,10 +185,12 @@ function calcStructure(candles) {
   const rising  = q2>q1 && q3>q2 && q4>q3;
   const falling = q2<q1 && q3<q2 && q4<q3;
   let trend = "CHOP";
-  if      (rising  && emaSlopePct >  0.05) trend = "UP";
-  else if (falling && emaSlopePct < -0.05) trend = "DOWN";
-  else if (emaSlopePct >  0.15) trend = "UP";
-  else if (emaSlopePct < -0.15) trend = "DOWN";
+  // Adaptive thresholds — 1m candles have much smaller moves than 15m
+  const slopeThresh = Math.abs(ema10[ema10.length-1]) > 1000 ? 0.02 : 0.005;
+  if      (rising  && emaSlopePct >  slopeThresh) trend = "UP";
+  else if (falling && emaSlopePct < -slopeThresh) trend = "DOWN";
+  else if (emaSlopePct >  slopeThresh * 3) trend = "UP";
+  else if (emaSlopePct < -slopeThresh * 3) trend = "DOWN";
   return {
     trend,
     swingHigh: Math.max(...candles.slice(-10).map(c=>c.high)),
@@ -394,11 +396,14 @@ async function runBacktest(onProgress) {
     if (upVotes.length > downVotes.length && upVotes.length > noVotes.length) {
       majoritySignal = "UP";
       avgScore = Math.round(upVotes.reduce((s, v) => s + v.score, 0) / upVotes.length);
-      majorityConfidence = upVotes.filter(v => v.confidence === "HIGH").length > upVotes.length / 2 ? "HIGH" : "MEDIUM";
+      // Require >60% vote agreement for HIGH confidence
+      const upAgreement = totalVotes > 0 ? upVotes.length / totalVotes : 0;
+      majorityConfidence = (upVotes.filter(v => v.confidence === "HIGH").length > upVotes.length / 2 && upAgreement > 0.6) ? "HIGH" : "MEDIUM";
     } else if (downVotes.length > upVotes.length && downVotes.length > noVotes.length) {
       majoritySignal = "DOWN";
       avgScore = Math.round(downVotes.reduce((s, v) => s + v.score, 0) / downVotes.length);
-      majorityConfidence = downVotes.filter(v => v.confidence === "HIGH").length > downVotes.length / 2 ? "HIGH" : "MEDIUM";
+      const downAgreement = totalVotes > 0 ? downVotes.length / totalVotes : 0;
+      majorityConfidence = (downVotes.filter(v => v.confidence === "HIGH").length > downVotes.length / 2 && downAgreement > 0.6) ? "HIGH" : "MEDIUM";
     } else {
       majoritySignal = "NO BET";
       avgScore = avgScoreAll;

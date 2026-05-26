@@ -133,10 +133,12 @@ function calcStructure(candles) {
   const risingQuarters = q2avg>q1avg && q3avg>q2avg && q4avg>q3avg;
   const fallingQuarters = q2avg<q1avg && q3avg<q2avg && q4avg<q3avg;
   let trend = "CHOP";
-  if (risingQuarters && emaSlopePct > 0.05) trend = "UP";
-  else if (fallingQuarters && emaSlopePct < -0.05) trend = "DOWN";
-  else if (emaSlopePct > 0.15) trend = "UP";
-  else if (emaSlopePct < -0.15) trend = "DOWN";
+  // Adaptive thresholds — 1m candles have much smaller moves than 15m
+  const slopeThresh = Math.abs(ema10arr[ema10arr.length-1]) > 1000 ? 0.02 : 0.005;
+  if      (risingQuarters  && emaSlopePct >  slopeThresh) trend = "UP";
+  else if (fallingQuarters && emaSlopePct < -slopeThresh) trend = "DOWN";
+  else if (emaSlopePct >  slopeThresh * 3) trend = "UP";
+  else if (emaSlopePct < -slopeThresh * 3) trend = "DOWN";
   return {
     trend,
     swingHigh: Math.max(...candles.slice(-10).map(c=>c.high)),
