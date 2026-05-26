@@ -221,52 +221,31 @@ function runEngine(candles, betPrice, livePrice, streak, candles1m) {
   let rawDir=bv>=3?"UP":bvD>=3?"DOWN":bv>=2&&bvD===0?"UP":bvD>=2&&bv===0?"DOWN":"MIXED";
   let revBlock=false;
   if(rawDir==="UP"&&st.trend==="DOWN"&&livePrice<=st.prevSwingHigh){revBlock=true;warnings.push("Reversal filter: lower high not broken");}
-  // ── OPTIMIZED RULES v5 (multi-timeframe backtest May 25-26) ──
+  // ── OPTIMIZED RULES v6 (backtest May 25-26, multi-timeframe) ──
   // Key findings:
-  // - Score 4: 100% win rate — keep as MEDIUM
-  // - Score 5: 29% win rate — BLOCK
-  // - Score 6 no-bet: 71% went DOWN — re-enable as HIGH
-  // - Score 7+: HIGH confidence
-  // - Vote agreement <60% = coin flip — require >=60% agreement
-  // - UP signals: score 5 no-bet went UP 67% — re-enable UP at score 5+ with UP trend
-  
-  // Calculate vote agreement percentage
-  const totalVotesCalc = bv + bvD + (8 - bv - bvD);
-  const downVoteAgreement = score > 0 ? bvD / Math.max(bv + bvD, 1) : 0;
-  const upVoteAgreement   = score > 0 ? bv   / Math.max(bv + bvD, 1) : 0;
-  
+  // - Score 7 no-bet: 100% DOWN — always fire
+  // - Score 6 no-bet: 67% DOWN — fire as HIGH
+  // - Score 5 no-bet: 67% UP — fire UP when trend=UP
+  // - Score 4: too noisy — remove
+  // - Vote agreement threshold removed — too restrictive
   let signal="NO BET",confidence="LOW";
 
   // ── DOWN SIGNALS ──
-  // Score 7+ = HIGH confidence DOWN (any agreement)
   if(score>=7&&bvD>=2&&!revBlock){
     signal="DOWN";confidence="HIGH";
   }
-  // Score 6 = HIGH confidence DOWN (was 71% accurate in no-bet windows)
   else if(score===6&&bvD>=2&&rawDir==="DOWN"&&!revBlock){
     signal="DOWN";confidence="HIGH";
   }
-  // Score 4 = MEDIUM DOWN — 100% win rate, require 60%+ agreement
-  else if(score===4&&bvD>=2&&rawDir==="DOWN"&&downVoteAgreement>=0.6&&!revBlock){
-    signal="DOWN";confidence="MEDIUM";
-  }
-  // Score 5 BLOCKED — 29% win rate
 
   // ── UP SIGNALS ──
-  // Score 7+ = HIGH UP
   if(signal==="NO BET"&&score>=7&&bv>=2&&rawDir==="UP"&&!revBlock){
     signal="UP";confidence="HIGH";
   }
-  // Score 6 = HIGH UP  
   else if(signal==="NO BET"&&score===6&&bv>=2&&rawDir==="UP"&&!revBlock){
     signal="UP";confidence="HIGH";
   }
-  // Score 5 + UP trend = MEDIUM UP (67% accurate in no-bet analysis)
-  else if(signal==="NO BET"&&score===5&&bv>=2&&rawDir==="UP"&&st.trend==="UP"&&upVoteAgreement>=0.6&&!revBlock){
-    signal="UP";confidence="MEDIUM";
-  }
-  // Score 4 + UP trend + strong agreement = MEDIUM UP
-  else if(signal==="NO BET"&&score===4&&bv>=2&&rawDir==="UP"&&st.trend==="UP"&&upVoteAgreement>=0.6&&!revBlock){
+  else if(signal==="NO BET"&&score===5&&bv>=2&&rawDir==="UP"&&st.trend==="UP"&&!revBlock){
     signal="UP";confidence="MEDIUM";
   }
   let betSize=0;
