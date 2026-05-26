@@ -178,27 +178,21 @@ function runEngine(candles, betPrice, livePrice, candles1m) {
   const bvD  = [m.macd<0, mom.dir==="DOWN", st.trend==="DOWN", livePrice<e50].filter(Boolean).length;
   const rawDir = bv>=3?"UP":bvD>=3?"DOWN":bv>=2&&bvD===0?"UP":bvD>=2&&bv===0?"DOWN":"MIXED";
 
-  // ── OPTIMIZED RULES v8 ──
+  // ── OPTIMIZED RULES v9 (all backtest data) ──
+  // Vote unanimity is the best predictor
   const macdBearish = m.macd < m.signal;
   const macdBullish = m.macd > m.signal;
   const priceAboveEMA = livePrice > e50;
   let signal = "NO BET", confidence = "LOW";
 
-  // Score 7+ = unconditional HIGH (rare, extremely reliable)
-  if (score >= 7) {
-    signal = priceAboveEMA ? "UP" : "DOWN";
-    confidence = "HIGH";
-  }
-  // Score 6 = HIGH — direction determined by MACD and price vs EMA
-  else if (score === 6) {
-    if (macdBullish && priceAboveEMA) { signal = "UP";   confidence = "HIGH"; }
-    else                              { signal = "DOWN";  confidence = "HIGH"; }
-  }
-  // Score 5 = MEDIUM — require clear directional confirmation
-  else if (score === 5) {
-    if      (macdBullish && priceAboveEMA)  { signal = "UP";   confidence = "MEDIUM"; }
-    else if (macdBearish && !priceAboveEMA) { signal = "DOWN";  confidence = "MEDIUM"; }
-  }
+  // bvD=4 = all 4 bearish indicators agree (unanimous bearish)
+  // bv=4  = all 4 bullish indicators agree (unanimous bullish)
+  if (bvD === 4 && score >= 5) { signal = "DOWN"; confidence = "HIGH"; }
+  else if (bvD === 4 && score >= 3) { signal = "DOWN"; confidence = "MEDIUM"; }
+  else if (bv === 4 && score >= 6)  { signal = "UP";   confidence = "HIGH"; }
+  else if (bv === 4 && score >= 4)  { signal = "UP";   confidence = "MEDIUM"; }
+  else if (bvD >= 3 && bv === 0 && score >= 6) { signal = "DOWN"; confidence = "MEDIUM"; }
+  else if (bv >= 3 && bvD === 0 && score >= 7) { signal = "UP";   confidence = "MEDIUM"; }
 
   return { signal, confidence, score, trend: st.trend, reasoning };
 }
