@@ -209,11 +209,11 @@ async function runSignalAndNotify() {
     const msUntilClose = currentWindowClose - now;
     const minsLeft = Math.round(msUntilClose / 60000);
 
-    // Rolling 15-min lookback: fetch 1-min candles and use last 15
-    const [livePrice, candles1m] = await Promise.all([getLivePrice(), getCandles(30, "1m")]);
-    const lookbackStart = now - MS15;
-    const rollingCandles = candles1m.filter(c => c.time >= lookbackStart);
-    const candles = rollingCandles.length >= 5 ? rollingCandles : candles1m.slice(-15);
+    // Fetch 100 1-min candles — enough history for EMA50, MACD, ATR
+    const [livePrice, candles1m] = await Promise.all([getLivePrice(), getCandles(100, "1m")]);
+    // Update last candle to live price so indicators reflect right now
+    if (candles1m.length > 0) candles1m[candles1m.length-1].close = livePrice;
+    const candles = candles1m;
 
     // Bet price = open of current 15m window
     const windowCandles = candles1m.filter(c => c.time >= currentWindowOpen);

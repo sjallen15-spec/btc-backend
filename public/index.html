@@ -88,38 +88,40 @@ async function saveStreak(streak) {
 // DATA FETCH
 // ═══════════════════════════════════════════════════════════════
 async function fetchBTCData() {
-  // Fetch 1-minute candles for rolling lookback + price
+  // Fetch 100 1-minute candles:
+  // - Last 100 mins gives enough history for EMA50, MACD (needs 26+), ATR
+  // - Signal is informed by all 100 candles for indicator accuracy
+  // - But the "lookback window" driving the signal is the last 15 mins
   const [btcRes, candleRes] = await Promise.all([
     fetch(`${API_BASE}/price`),
-    fetch(`${API_BASE}/candles?interval=1m&limit=30`) // last 30 mins of 1-min candles
+    fetch(`${API_BASE}/candles?interval=1m&limit=100`)
   ]);
   if (!btcRes.ok || !candleRes.ok) throw new Error("Backend error");
   const priceData = await btcRes.json();
   const allCandles1m = await candleRes.json();
-  
+
   const now = Date.now();
   const currentWindowOpen  = current15mOpenTime(now);
   const currentWindowClose = current15mCloseTime(now);
-  const lookbackStart = now - MS15; // 15 minutes ago
-  
-  // Rolling 15-minute lookback: last 15 1-minute candles from now
-  const rollingCandles = allCandles1m.filter(c => c.time >= lookbackStart && c.time <= now);
-  
-  // Current window candles (for bet price = window open price)
-  const currentWindowCandles = allCandles1m.filter(c => c.time >= currentWindowOpen && c.time <= now);
-  const betPrice = currentWindowCandles.length > 0 ? currentWindowCandles[0].open : priceData.price;
-  
+
+  // Bet price = open of current 15m window
+  const windowCandles = allCandles1m.filter(c => c.time >= currentWindowOpen);
+  const betPrice = windowCandles.length > 0 ? windowCandles[0].open : priceData.price;
+
+  // Update last candle close to live price so indicators reflect right now
+  if (allCandles1m.length > 0) {
+    allCandles1m[allCandles1m.length - 1].close = priceData.price;
+  }
+
   return {
     price: priceData.price,
     betPrice,
-    candles: rollingCandles.length >= 5 ? rollingCandles : allCandles1m.slice(-15),
+    candles: allCandles1m, // full 100 1-min candles for indicator accuracy
     candleOpenTime: currentWindowOpen,
     candleCloseTime: currentWindowClose,
     msUntilClose: currentWindowClose - now,
     source: "cryptocompare",
-    rollingLookback: true,
-    lookbackStart,
-    lookbackMinutes: Math.round((now - lookbackStart) / 60000),
+    lookbackMinutes: 100,
   };
 }
 
@@ -268,14 +270,13 @@ async function runBacktest(onProgress) {
   onProgress("Fetching 1-minute candles for detailed backtest...");
   let candles1m = [];
   try {
-    // Fetch 1-minute candles — 2016 = ~2 weeks at 1min granularity (CryptoCompare max per call)
-    const r = await fetch(`${API_BASE}/candles?interval=1m&limit=2016`);
+    // Fetch max 1-min candles — CryptoCompare allows up to 2000
+    const r = await fetch(`${API_BASE}/candles?interval=1m&limit=2000`);
     if (!r.ok) throw new Error("Backend error");
     candles1m = await r.json();
   } catch {
     onProgress("Backend failed — using synthetic candles");
     const s = generateSynthetic(77000, 200);
-    // Simulate 1-min from 15-min by splitting each candle into 15 sub-candles
     candles1m = [];
     for (const c of s.candles) {
       for (let i = 0; i < 15; i++) {
@@ -311,50 +312,23 @@ async function runBacktest(onProgress) {
     if (!windowCandles || windowCandles.length < 3) continue;
     if (!nextCandles || nextCandles.length < 1) continue;
 
-    // Build cumulative 15m candle history up to this window using prior windows
-    const prior15mCandles = [];
-    for (let pi = 0; pi < wi; pi++) {
-      const pKey = windowKeys[pi];
-      const pCandles = windowMap[pKey];
-      if (!pCandles || pCandles.length === 0) continue;
-      const opens  = pCandles.map(c => c.open);
-      const closes = pCandles.map(c => c.close);
-      const highs  = pCandles.map(c => c.high);
-      const lows   = pCandles.map(c => c.low);
-      prior15mCandles.push({
-        time: pKey,
-        open: opens[0],
-        high: Math.max(...highs),
-        low: Math.min(...lows),
-        close: closes[closes.length - 1],
-        volume: pCandles.reduce((s, c) => s + c.volume, 0),
-        closeTime: pKey + MS15,
-      });
-    }
-    if (prior15mCandles.length < 26) continue;
+    // Use 100 1-min candles PRIOR to this window for indicator history
+    // This mirrors exactly how the live signal works
+    const priorCandles1m = candles1m.filter(c => c.time < windowStart).slice(-100);
+    if (priorCandles1m.length < 30) continue; // need enough history for MACD
 
     // Run signal at every 1-minute mark within this window
     const upVotes = [], downVotes = [], noVotes = [];
     const minuteSignals = [];
 
-    for (let mi = 2; mi < windowCandles.length; mi++) {
-      // Build slice: all prior 15m candles + current window candles up to this minute
+    for (let mi = 0; mi < windowCandles.length; mi++) {
+      // Slice: 100 prior 1-min candles + current window candles up to this minute
       const currentMinCandles = windowCandles.slice(0, mi + 1);
-      // Create a synthetic "current" 15m candle from the 1-min data so far
-      const synthCurrent = {
-        time: windowStart,
-        open: currentMinCandles[0].open,
-        high: Math.max(...currentMinCandles.map(c => c.high)),
-        low: Math.min(...currentMinCandles.map(c => c.low)),
-        close: currentMinCandles[currentMinCandles.length - 1].close,
-        volume: currentMinCandles.reduce((s, c) => s + c.volume, 0),
-        closeTime: windowStart + MS15,
-      };
-      const slice = [...prior15mCandles, synthCurrent];
-      const betPrice = currentMinCandles[0].open;
-      const livePrice = synthCurrent.close;
+      const slice = [...priorCandles1m, ...currentMinCandles];
+      const betPrice = windowCandles[0].open; // window open price
+      const livePrice = currentMinCandles[currentMinCandles.length - 1].close;
       const sig = runEngine(slice, betPrice, livePrice, { wins: 0, losses: 0 });
-      minuteSignals.push({ minute: mi, signal: sig.signal, score: sig.score, confidence: sig.confidence });
+      minuteSignals.push({ minute: mi, signal: sig.signal, score: sig.score, confidence: sig.confidence, trend: sig._meta?.st?.trend || "CHOP" });
       if (sig.signal === "UP") upVotes.push(sig);
       else if (sig.signal === "DOWN") downVotes.push(sig);
       else noVotes.push(sig);
