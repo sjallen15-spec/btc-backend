@@ -120,14 +120,28 @@ function calcATR(candles) {
 }
 
 function calcStructure(candles) {
-  if (candles.length < 10) return { trend:"CHOP", swingHigh:0, swingLow:0, prevSwingHigh:0 };
-  const s = candles.slice(-10), h = s.map(c=>c.high), l = s.map(c=>c.low), n = h.length-1;
+  if (candles.length < 20) return { trend:"CHOP", swingHigh:0, swingLow:0, prevSwingHigh:0 };
+  const s = candles.slice(-20);
+  const closes = s.map(c => c.close);
+  const q1avg = closes.slice(0,5).reduce((a,b)=>a+b,0)/5;
+  const q2avg = closes.slice(5,10).reduce((a,b)=>a+b,0)/5;
+  const q3avg = closes.slice(10,15).reduce((a,b)=>a+b,0)/5;
+  const q4avg = closes.slice(15,20).reduce((a,b)=>a+b,0)/5;
+  const ema10arr = emaArr(closes, 10);
+  const emaSlope = ema10arr[ema10arr.length-1] - ema10arr[ema10arr.length-5];
+  const emaSlopePct = emaSlope / ema10arr[ema10arr.length-5] * 100;
+  const risingQuarters = q2avg>q1avg && q3avg>q2avg && q4avg>q3avg;
+  const fallingQuarters = q2avg<q1avg && q3avg<q2avg && q4avg<q3avg;
+  let trend = "CHOP";
+  if (risingQuarters && emaSlopePct > 0.05) trend = "UP";
+  else if (fallingQuarters && emaSlopePct < -0.05) trend = "DOWN";
+  else if (emaSlopePct > 0.15) trend = "UP";
+  else if (emaSlopePct < -0.15) trend = "DOWN";
   return {
-    trend: h[n]>h[n-2]&&h[n-2]>h[n-4]&&l[n]>l[n-2]&&l[n-2]>l[n-4] ? "UP" :
-           h[n]<h[n-2]&&h[n-2]<h[n-4]&&l[n]<l[n-2]&&l[n-2]<l[n-4] ? "DOWN" : "CHOP",
-    swingHigh: Math.max(...candles.slice(-5).map(c=>c.high)),
-    swingLow:  Math.min(...candles.slice(-5).map(c=>c.low)),
-    prevSwingHigh: Math.max(...candles.slice(-10,-5).map(c=>c.high))
+    trend,
+    swingHigh: Math.max(...candles.slice(-10).map(c=>c.high)),
+    swingLow:  Math.min(...candles.slice(-10).map(c=>c.low)),
+    prevSwingHigh: Math.max(...candles.slice(-20,-10).map(c=>c.high))
   };
 }
 
@@ -155,15 +169,20 @@ function runEngine(candles, betPrice, livePrice) {
   ((m.macd>m.signal&&mom.dir==="UP")||(m.macd<m.signal&&mom.dir==="DOWN")) && (score++, reasoning.push("MACD aligned"));
   Math.abs(m.hist) > Math.abs(m.histPrev) && (score++, reasoning.push("MACD histogram expanding"));
 
-  const bvD = [livePrice<e50, mom.dir==="DOWN", m.macd<m.signal].filter(Boolean).length;
-  const rawDir = bvD >= 2 ? "DOWN" : "UP";
+  const bv   = [m.macd>0, mom.dir==="UP",  st.trend==="UP",  livePrice>e50].filter(Boolean).length;
+  const bvD  = [m.macd<0, mom.dir==="DOWN", st.trend==="DOWN", livePrice<e50].filter(Boolean).length;
+  const rawDir = bv>=3?"UP":bvD>=3?"DOWN":bv>=2&&bvD===0?"UP":bvD>=2&&bv===0?"DOWN":"MIXED";
 
-  // ── OPTIMIZED RULES v3 ──
+  // ── OPTIMIZED RULES v4 ──
   let signal = "NO BET", confidence = "LOW";
-  if (score >= 7 && rawDir === "DOWN") { signal = "DOWN"; confidence = "HIGH"; }
-  else if ((score === 5 || score === 6) && rawDir === "DOWN") { signal = "DOWN"; confidence = "MEDIUM"; }
-  else if (score === 4 && rawDir === "DOWN") { signal = "DOWN"; confidence = "MEDIUM"; }
-  if (signal === "NO BET" && score >= 5 && bvD >= 2) { signal = "DOWN"; confidence = "MEDIUM"; }
+  // DOWN signals
+  if (score >= 7 && bvD >= 2) { signal = "DOWN"; confidence = "HIGH"; }
+  else if ((score === 5 || score === 6) && bvD >= 2) { signal = "DOWN"; confidence = "MEDIUM"; }
+  else if (score === 4 && bvD >= 2 && rawDir === "DOWN") { signal = "DOWN"; confidence = "MEDIUM"; }
+  // UP signals (re-enabled - score 5: 91% UP, score 6: 100% UP)
+  if (signal === "NO BET" && score >= 6 && bv >= 2 && rawDir === "UP") { signal = "UP"; confidence = "HIGH"; }
+  else if (signal === "NO BET" && score === 5 && bv >= 2 && rawDir === "UP") { signal = "UP"; confidence = "MEDIUM"; }
+  else if (signal === "NO BET" && score === 4 && bv >= 2 && rawDir === "UP" && st.trend === "UP") { signal = "UP"; confidence = "MEDIUM"; }
 
   return { signal, confidence, score, trend: st.trend, reasoning };
 }

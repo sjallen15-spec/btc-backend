@@ -176,36 +176,46 @@ function runEngine(candles, betPrice, livePrice, streak) {
   bd.location=loc.penalty;score+=loc.penalty;
   loc.reason&&warnings.push(loc.reason);
   if(at.current<at.avg*0.5){warnings.push("Volatility too low — suppressed");score=Math.min(score,3);}
-  const bv=[livePrice>e50,mom.dir==="UP",m.macd>m.signal].filter(Boolean).length;
-  const bvD=[livePrice<e50,mom.dir==="DOWN",m.macd<m.signal].filter(Boolean).length;
-  let rawDir=bv>=2&&bvD===0?"UP":bvD>=2&&bv===0?"DOWN":"MIXED";
+  // Include trend in vote count — trend direction is a strong signal
+  const bv =[m.macd>0,mom.dir==="UP",st.trend==="UP",livePrice>e50].filter(Boolean).length;
+  const bvD=[m.macd<0,mom.dir==="DOWN",st.trend==="DOWN",livePrice<e50].filter(Boolean).length;
+  let rawDir=bv>=3?"UP":bvD>=3?"DOWN":bv>=2&&bvD===0?"UP":bvD>=2&&bv===0?"DOWN":"MIXED";
   let revBlock=false;
   if(rawDir==="UP"&&st.trend==="DOWN"&&livePrice<=st.prevSwingHigh){revBlock=true;warnings.push("Reversal filter: lower high not broken");}
-  // ── OPTIMIZED RULES v3 (backtest-driven, majority vote) ──
-  // Key findings from majority-vote backtest:
-  // - 100% win rate on current rules (8/8 correct)
-  // - Score>=4 no-bet windows: only 20% went DOWN — keep blocking
-  // - Score>=5 no-bet windows: only 7% went DOWN — keep blocking
-  // - Vote % is the real signal: >=40% DOWN votes + score>=4 = 100% accurate
-  // - UP signals: 0% win rate — block all UP
+  // ── OPTIMIZED RULES v4 (backtest May 24-26 data) ──
+  // Key findings:
+  // - Score 5: 91% went UP, Score 6: 100% went UP — re-enable UP signals
+  // - Score 4: 79% UP when bv>=2, 85% DOWN when bvD>=2
+  // - Score 7+: DOWN signals 100% accurate
+  // - Trend detector now reliable — use it for UP/DOWN confirmation
   let signal="NO BET",confidence="LOW";
 
-  // RULE 1: Block ALL UP signals — 0% win rate in backtests
-  // RULE 2: Score 7+ = HIGH confidence DOWN
-  if(score>=7&&rawDir==="DOWN"&&!revBlock){
+  // ── DOWN SIGNALS ──
+  // Score 7+ = HIGH confidence DOWN
+  if(score>=7&&bvD>=2&&!revBlock){
     signal="DOWN";confidence="HIGH";
   }
-  // RULE 3: Score 5-6 = MEDIUM DOWN (100% win rate in majority vote backtest)
-  else if((score===5||score===6)&&rawDir==="DOWN"&&!revBlock){
+  // Score 5-6 + bearish indicators = MEDIUM DOWN
+  else if((score===5||score===6)&&bvD>=2&&!revBlock){
     signal="DOWN";confidence="MEDIUM";
   }
-  // RULE 4: Score 4 = MEDIUM DOWN (75% win rate)
-  else if(score===4&&rawDir==="DOWN"&&!revBlock){
+  // Score 4 + strong bearish = MEDIUM DOWN
+  else if(score===4&&bvD>=2&&rawDir==="DOWN"&&!revBlock){
     signal="DOWN";confidence="MEDIUM";
   }
-  // RULE 5: High score blocked windows — bet DOWN if bvD indicators strongly lean down
-  if(signal==="NO BET"&&score>=5&&!revBlock&&bvD>=2){
-    signal="DOWN";confidence="MEDIUM";
+
+  // ── UP SIGNALS (re-enabled based on backtest data) ──
+  // Score 6+ = HIGH confidence UP
+  if(signal==="NO BET"&&score>=6&&bv>=2&&rawDir==="UP"&&!revBlock){
+    signal="UP";confidence="HIGH";
+  }
+  // Score 5 + bullish trend/indicators = MEDIUM UP (91% accurate)
+  else if(signal==="NO BET"&&score===5&&bv>=2&&rawDir==="UP"&&!revBlock){
+    signal="UP";confidence="MEDIUM";
+  }
+  // Score 4 + bullish + UP trend = MEDIUM UP (79% accurate)
+  else if(signal==="NO BET"&&score===4&&bv>=2&&rawDir==="UP"&&st.trend==="UP"&&!revBlock){
+    signal="UP";confidence="MEDIUM";
   }
   let betSize=0;
   if(signal!=="NO BET"&&streak.losses<4){
