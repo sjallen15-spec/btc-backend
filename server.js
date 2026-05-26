@@ -202,11 +202,26 @@ let lastScore = 0;
 async function runSignalAndNotify() {
   console.log(`[${new Date().toISOString()}] Running signal check...`);
   try {
-    const [livePrice, candles] = await Promise.all([getLivePrice(), getCandles(100)]);
-    const betPrice = candles[candles.length-1].open;
+    const MS15 = 15 * 60 * 1000;
+    const now = Date.now();
+    const currentWindowOpen = Math.floor(now / MS15) * MS15;
+    const currentWindowClose = currentWindowOpen + MS15;
+    const msUntilClose = currentWindowClose - now;
+    const minsLeft = Math.round(msUntilClose / 60000);
+
+    // Rolling 15-min lookback: fetch 1-min candles and use last 15
+    const [livePrice, candles1m] = await Promise.all([getLivePrice(), getCandles(30, "1m")]);
+    const lookbackStart = now - MS15;
+    const rollingCandles = candles1m.filter(c => c.time >= lookbackStart);
+    const candles = rollingCandles.length >= 5 ? rollingCandles : candles1m.slice(-15);
+
+    // Bet price = open of current 15m window
+    const windowCandles = candles1m.filter(c => c.time >= currentWindowOpen);
+    const betPrice = windowCandles.length > 0 ? windowCandles[0].open : livePrice;
+
     const sig = runEngine(candles, betPrice, livePrice);
 
-    console.log(`Signal: ${sig.signal} | Score: ${sig.score} | Confidence: ${sig.confidence} | Last: ${lastSignal}`);
+    console.log(`Signal: ${sig.signal} | Score: ${sig.score} | Confidence: ${sig.confidence} | ${minsLeft}m left | Last: ${lastSignal}`);
 
     const signalChanged = sig.signal !== lastSignal;
     const scoreChanged  = sig.score !== lastScore && sig.signal !== "NO BET";
@@ -215,11 +230,15 @@ async function runSignalAndNotify() {
       const arrow = sig.signal === "UP" ? "🟢" : "🔴";
       const changeNote = signalChanged && lastSignal !== "NO BET"
         ? `\n⚠️ _Changed from ${lastSignal} → ${sig.signal}_` : "";
+      const windowTime = new Date(currentWindowOpen).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
+      const closeTime  = new Date(currentWindowClose).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
       const msg = `${arrow} *BTC SIGNAL: ${sig.signal}*${changeNote}\n\n` +
         `Score: ${sig.score}/8 | Confidence: ${sig.confidence}\n` +
         `Trend: ${sig.trend}\n` +
+        `Window: ${windowTime} → ${closeTime} (${minsLeft}m left)\n` +
         `Live Price: $${livePrice.toLocaleString()}\n` +
-        `Bet Price: $${betPrice.toLocaleString()}\n\n` +
+        `Window Open: $${betPrice.toLocaleString()}\n` +
+        `Signal data: rolling last 15 mins\n\n` +
         `${sig.reasoning.slice(0,3).join("\n")}\n\n` +
         `_NOT FINANCIAL ADVICE_`;
       await sendTelegram(msg);

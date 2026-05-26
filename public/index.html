@@ -88,9 +88,39 @@ async function saveStreak(streak) {
 // DATA FETCH
 // ═══════════════════════════════════════════════════════════════
 async function fetchBTCData() {
-  const r = await fetch(`${API_BASE}/btc?interval=15m&limit=100`);
-  if (!r.ok) throw new Error(`Backend error: ${r.status}`);
-  return r.json();
+  // Fetch 1-minute candles for rolling lookback + price
+  const [btcRes, candleRes] = await Promise.all([
+    fetch(`${API_BASE}/price`),
+    fetch(`${API_BASE}/candles?interval=1m&limit=30`) // last 30 mins of 1-min candles
+  ]);
+  if (!btcRes.ok || !candleRes.ok) throw new Error("Backend error");
+  const priceData = await btcRes.json();
+  const allCandles1m = await candleRes.json();
+  
+  const now = Date.now();
+  const currentWindowOpen  = current15mOpenTime(now);
+  const currentWindowClose = current15mCloseTime(now);
+  const lookbackStart = now - MS15; // 15 minutes ago
+  
+  // Rolling 15-minute lookback: last 15 1-minute candles from now
+  const rollingCandles = allCandles1m.filter(c => c.time >= lookbackStart && c.time <= now);
+  
+  // Current window candles (for bet price = window open price)
+  const currentWindowCandles = allCandles1m.filter(c => c.time >= currentWindowOpen && c.time <= now);
+  const betPrice = currentWindowCandles.length > 0 ? currentWindowCandles[0].open : priceData.price;
+  
+  return {
+    price: priceData.price,
+    betPrice,
+    candles: rollingCandles.length >= 5 ? rollingCandles : allCandles1m.slice(-15),
+    candleOpenTime: currentWindowOpen,
+    candleCloseTime: currentWindowClose,
+    msUntilClose: currentWindowClose - now,
+    source: "cryptocompare",
+    rollingLookback: true,
+    lookbackStart,
+    lookbackMinutes: Math.round((now - lookbackStart) / 60000),
+  };
 }
 
 function generateSynthetic(basePrice = 77000, count = 100) {
@@ -356,10 +386,27 @@ async function runBacktest(onProgress) {
       avgScore = avgScoreAll;
     }
 
-    // Actual result: did price go up or down from window open to next window open?
-    const windowOpen  = windowCandles[0].open;
-    const windowClose = nextCandles[0].open; // next window's open = this window's effective close
-    const actualDir   = windowClose > windowOpen ? "UP" : "DOWN";
+    // CORRECTED LOGIC: Signal during window W predicts window W+1
+    // - Data used: all of window W's 1-minute candles
+    // - Prediction: direction of window W+1
+    // - Bet price: open of window W+1 (= close/open boundary)
+    // - Result: did W+1 close above or below W+1 open?
+    const currentWindowOpen = windowCandles[0].open;
+    const nextWindowOpen  = nextCandles[0].open;  // this is the BET PRICE
+    const nextWindowKey2  = windowKeys[wi + 2];
+    const nextNextCandles = nextWindowKey2 ? windowMap[nextWindowKey2] : null;
+    
+    // Result = did next window go UP or DOWN from its own open?
+    let actualDir = "DOWN";
+    let nextWindowClose = nextWindowOpen;
+    if (nextNextCandles && nextNextCandles.length > 0) {
+      nextWindowClose = nextNextCandles[0].open; // next window's close = window after that's open
+      actualDir = nextWindowClose > nextWindowOpen ? "UP" : "DOWN";
+    } else if (nextCandles.length > 0) {
+      nextWindowClose = nextCandles[nextCandles.length-1].close;
+      actualDir = nextWindowClose > nextWindowOpen ? "UP" : "DOWN";
+    }
+    
     const signalCorrect = majoritySignal !== "NO BET" ? majoritySignal === actualDir : null;
 
     results.push({
@@ -368,14 +415,15 @@ async function runBacktest(onProgress) {
       confidence: majorityConfidence,
       score: avgScore,
       trend: minuteSignals[minuteSignals.length - 1]?.trend || "CHOP",
-      openPrice: windowOpen,
-      closePrice: windowClose,
-      nextClose: windowClose,
+      openPrice: currentWindowOpen,
+      closePrice: nextWindowOpen,   // bet price = next window open
+      nextClose: nextWindowClose,
       actualDir,
       signalCorrect,
       betPlaced: majoritySignal !== "NO BET",
       voteBreakdown,
       totalMinutes: windowCandles.length,
+      note: "Signal during W predicts W+1 direction",
     });
 
     if (wi % 10 === 0) onProgress(`Processed ${wi}/${windowKeys.length} windows...`);
@@ -746,10 +794,13 @@ function BTCDecisionEngine() {
       setLoadMsg("Running scoring engine...");
       setSource(data.source);
       const sk = streak;
+      // Rolling 15-min lookback informs signal for current window
       const out = runEngine(data.candles, data.betPrice, data.price, sk);
       out._meta.candleOpenTime  = data.candleOpenTime;
       out._meta.candleCloseTime = data.candleCloseTime;
       out._meta.msUntilClose    = data.msUntilClose;
+      out._meta.lookbackStart   = data.lookbackStart;
+      out._meta.lookbackMinutes = data.lookbackMinutes;
       setResult(out);
       setLastRefresh(new Date());
       setMsLeft(data.msUntilClose || msUntilNextBoundary());
@@ -870,14 +921,20 @@ function BTCDecisionEngine() {
 
         {/* COUNTDOWN HEADER */}
         {tab==="signal"&&(
-          <div className="card fi" style={{marginBottom:12,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-            <div>
-              <div style={{fontSize:9,color:FG4,letterSpacing:".15em",marginBottom:4}}>CURRENT 15M WINDOW</div>
-              <div style={{fontSize:13,color:FG2}}>Opens <span style={{color:FG,fontWeight:700}}>{fmtTime(current15mOpenTime())}</span> → <span style={{color:FG,fontWeight:700}}>{fmtTime(current15mCloseTime())}</span></div>
+          <div className="card fi" style={{marginBottom:12}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+              <div>
+                <div style={{fontSize:9,color:FG4,letterSpacing:".15em",marginBottom:4}}>CURRENT 15M WINDOW</div>
+                <div style={{fontSize:13,color:FG2}}>Opens <span style={{color:FG,fontWeight:700}}>{fmtTime(current15mOpenTime())}</span> → <span style={{color:FG,fontWeight:700}}>{fmtTime(current15mCloseTime())}</span></div>
+              </div>
+              <div style={{textAlign:"right"}}>
+                <div style={{fontSize:9,color:FG4,letterSpacing:".15em",marginBottom:2}}>TIME LEFT</div>
+                <div style={{fontFamily:"'Bebas Neue'",fontSize:36,color:countdownColor,lineHeight:1}} className={urgent?"urgent":""}>{formatCountdown(msLeft)}</div>
+              </div>
             </div>
-            <div style={{textAlign:"right"}}>
-              <div style={{fontSize:9,color:FG4,letterSpacing:".15em",marginBottom:2}}>TIME LEFT</div>
-              <div style={{fontFamily:"'Bebas Neue'",fontSize:36,color:countdownColor,lineHeight:1}} className={urgent?"urgent":""}>{formatCountdown(msLeft)}</div>
+            <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:FG4}}>
+              <span>Signal data: <span style={{color:FG3}}>rolling last 15 mins</span></span>
+              <span style={{color:AMBER}}>Updates every minute</span>
             </div>
           </div>
         )}
@@ -932,7 +989,7 @@ function BTCDecisionEngine() {
                       <div style={{fontSize:9,color:FG4,letterSpacing:".15em",marginBottom:2}}>CURRENT 15M WINDOW</div>
                       <div style={{fontSize:13,color:FG2}}>
                         <span style={{color:AMBER,fontWeight:700}}>${meta?.betPrice.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2})}</span>
-                        <span style={{color:FG4,fontSize:10}}> BET PRICE</span>
+                        <span style={{color:FG4,fontSize:10}}> WINDOW OPEN</span>
                       </div>
                     </div>
                     <div style={{textAlign:"center"}}>
@@ -941,7 +998,7 @@ function BTCDecisionEngine() {
                       <div style={{fontSize:10,color:FG4}}>right now</div>
                     </div>
                     <div style={{textAlign:"right"}}>
-                      <div style={{fontSize:9,color:FG4,marginBottom:2}}>VS BET</div>
+                      <div style={{fontSize:9,color:FG4,marginBottom:2}}>VS WINDOW OPEN</div>
                       <div style={{fontFamily:"'Bebas Neue'",fontSize:22,color:meta?.priceVsBet>=0?GREEN:RED}}>
                         {meta?.priceVsBet>=0?"+":""}{meta?.priceVsBet.toFixed(0)}
                       </div>
