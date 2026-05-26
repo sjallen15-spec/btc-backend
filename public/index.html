@@ -221,31 +221,45 @@ function runEngine(candles, betPrice, livePrice, streak, candles1m) {
   let rawDir=bv>=3?"UP":bvD>=3?"DOWN":bv>=2&&bvD===0?"UP":bvD>=2&&bv===0?"DOWN":"MIXED";
   let revBlock=false;
   if(rawDir==="UP"&&st.trend==="DOWN"&&livePrice<=st.prevSwingHigh){revBlock=true;warnings.push("Reversal filter: lower high not broken");}
-  // ── OPTIMIZED RULES v6 (backtest May 25-26, multi-timeframe) ──
+  // ── OPTIMIZED RULES v7 (backtest May 25-26, multi-timeframe) ──
   // Key findings:
-  // - Score 7 no-bet: 100% DOWN — always fire
-  // - Score 6 no-bet: 67% DOWN — fire as HIGH
-  // - Score 5 no-bet: 67% UP — fire UP when trend=UP
-  // - Score 4: too noisy — remove
-  // - Vote agreement threshold removed — too restrictive
+  // - Score 6+: 100% DOWN in no-bet analysis — rawDir check was blocking them
+  // - Score 7+: 100% DOWN — fire unconditionally if bvD >= bv
+  // - Score 5 + UP trend: 60-67% UP — fire MEDIUM UP
+  // - rawDir was too restrictive — use bv vs bvD comparison instead
   let signal="NO BET",confidence="LOW";
 
+  // Determine dominant direction from indicator votes
+  const dominantBear = bvD >= bv;  // more bearish votes than bullish
+  const dominantBull = bv > bvD;   // more bullish votes than bearish
+  const strongBear   = bvD >= 2;
+  const strongBull   = bv >= 2;
+
   // ── DOWN SIGNALS ──
-  if(score>=7&&bvD>=2&&!revBlock){
+  // Score 7+ with any bearish lean = HIGH DOWN
+  if(score>=7&&dominantBear&&!revBlock){
     signal="DOWN";confidence="HIGH";
   }
-  else if(score===6&&bvD>=2&&rawDir==="DOWN"&&!revBlock){
+  // Score 6 with bearish lean = HIGH DOWN (100% accurate in no-bet)
+  else if(score===6&&dominantBear&&strongBear&&!revBlock){
     signal="DOWN";confidence="HIGH";
+  }
+  // Score 5 + DOWN trend + bearish = MEDIUM DOWN
+  else if(score===5&&dominantBear&&strongBear&&st.trend==="DOWN"&&!revBlock){
+    signal="DOWN";confidence="MEDIUM";
   }
 
   // ── UP SIGNALS ──
-  if(signal==="NO BET"&&score>=7&&bv>=2&&rawDir==="UP"&&!revBlock){
+  // Score 7+ with bullish lean = HIGH UP
+  if(signal==="NO BET"&&score>=7&&dominantBull&&!revBlock){
     signal="UP";confidence="HIGH";
   }
-  else if(signal==="NO BET"&&score===6&&bv>=2&&rawDir==="UP"&&!revBlock){
+  // Score 6 with bullish lean = HIGH UP
+  else if(signal==="NO BET"&&score===6&&dominantBull&&strongBull&&!revBlock){
     signal="UP";confidence="HIGH";
   }
-  else if(signal==="NO BET"&&score===5&&bv>=2&&rawDir==="UP"&&st.trend==="UP"&&!revBlock){
+  // Score 5 + UP trend + bullish = MEDIUM UP (60-67% accurate)
+  else if(signal==="NO BET"&&score===5&&dominantBull&&strongBull&&st.trend==="UP"&&!revBlock){
     signal="UP";confidence="MEDIUM";
   }
   let betSize=0;

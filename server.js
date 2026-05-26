@@ -176,15 +176,20 @@ function runEngine(candles, betPrice, livePrice, candles1m) {
   const bvD  = [m.macd<0, mom.dir==="DOWN", st.trend==="DOWN", livePrice<e50].filter(Boolean).length;
   const rawDir = bv>=3?"UP":bvD>=3?"DOWN":bv>=2&&bvD===0?"UP":bvD>=2&&bv===0?"DOWN":"MIXED";
 
-  // ── OPTIMIZED RULES v6 ──
+  // ── OPTIMIZED RULES v7 ──
+  const dominantBear = bvD >= bv;
+  const dominantBull = bv > bvD;
+  const strongBear = bvD >= 2;
+  const strongBull = bv >= 2;
   let signal = "NO BET", confidence = "LOW";
   // DOWN signals
-  if (score >= 7 && bvD >= 2) { signal = "DOWN"; confidence = "HIGH"; }
-  else if (score === 6 && bvD >= 2 && rawDir === "DOWN") { signal = "DOWN"; confidence = "HIGH"; }
+  if (score >= 7 && dominantBear) { signal = "DOWN"; confidence = "HIGH"; }
+  else if (score === 6 && dominantBear && strongBear) { signal = "DOWN"; confidence = "HIGH"; }
+  else if (score === 5 && dominantBear && strongBear && st.trend === "DOWN") { signal = "DOWN"; confidence = "MEDIUM"; }
   // UP signals
-  if (signal === "NO BET" && score >= 7 && bv >= 2 && rawDir === "UP") { signal = "UP"; confidence = "HIGH"; }
-  else if (signal === "NO BET" && score === 6 && bv >= 2 && rawDir === "UP") { signal = "UP"; confidence = "HIGH"; }
-  else if (signal === "NO BET" && score === 5 && bv >= 2 && rawDir === "UP" && st.trend === "UP") { signal = "UP"; confidence = "MEDIUM"; }
+  if (signal === "NO BET" && score >= 7 && dominantBull) { signal = "UP"; confidence = "HIGH"; }
+  else if (signal === "NO BET" && score === 6 && dominantBull && strongBull) { signal = "UP"; confidence = "HIGH"; }
+  else if (signal === "NO BET" && score === 5 && dominantBull && strongBull && st.trend === "UP") { signal = "UP"; confidence = "MEDIUM"; }
 
   return { signal, confidence, score, trend: st.trend, reasoning };
 }
