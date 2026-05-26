@@ -176,20 +176,27 @@ function runEngine(candles, betPrice, livePrice, candles1m) {
   const bvD  = [m.macd<0, mom.dir==="DOWN", st.trend==="DOWN", livePrice<e50].filter(Boolean).length;
   const rawDir = bv>=3?"UP":bvD>=3?"DOWN":bv>=2&&bvD===0?"UP":bvD>=2&&bv===0?"DOWN":"MIXED";
 
-  // ── OPTIMIZED RULES v7 ──
-  const dominantBear = bvD >= bv;
-  const dominantBull = bv > bvD;
-  const strongBear = bvD >= 2;
-  const strongBull = bv >= 2;
+  // ── OPTIMIZED RULES v8 ──
+  const macdBearish = m.macd < m.signal;
+  const macdBullish = m.macd > m.signal;
+  const priceAboveEMA = livePrice > e50;
   let signal = "NO BET", confidence = "LOW";
-  // DOWN signals
-  if (score >= 7 && dominantBear) { signal = "DOWN"; confidence = "HIGH"; }
-  else if (score === 6 && dominantBear && strongBear) { signal = "DOWN"; confidence = "HIGH"; }
-  else if (score === 5 && dominantBear && strongBear && st.trend === "DOWN") { signal = "DOWN"; confidence = "MEDIUM"; }
-  // UP signals
-  if (signal === "NO BET" && score >= 7 && dominantBull) { signal = "UP"; confidence = "HIGH"; }
-  else if (signal === "NO BET" && score === 6 && dominantBull && strongBull) { signal = "UP"; confidence = "HIGH"; }
-  else if (signal === "NO BET" && score === 5 && dominantBull && strongBull && st.trend === "UP") { signal = "UP"; confidence = "MEDIUM"; }
+
+  // Score 7+ = unconditional HIGH (rare, extremely reliable)
+  if (score >= 7) {
+    signal = priceAboveEMA ? "UP" : "DOWN";
+    confidence = "HIGH";
+  }
+  // Score 6 = HIGH — direction determined by MACD and price vs EMA
+  else if (score === 6) {
+    if (macdBullish && priceAboveEMA) { signal = "UP";   confidence = "HIGH"; }
+    else                              { signal = "DOWN";  confidence = "HIGH"; }
+  }
+  // Score 5 = MEDIUM — require clear directional confirmation
+  else if (score === 5) {
+    if      (macdBullish && priceAboveEMA)  { signal = "UP";   confidence = "MEDIUM"; }
+    else if (macdBearish && !priceAboveEMA) { signal = "DOWN";  confidence = "MEDIUM"; }
+  }
 
   return { signal, confidence, score, trend: st.trend, reasoning };
 }
@@ -220,7 +227,7 @@ async function runSignalAndNotify() {
     const [livePrice, candles15m, candles1m] = await Promise.all([
       getLivePrice(),
       getCandles(100, "15m"),
-      getCandles(30, "1m")
+      getCandles(50, "1m")
     ]);
     // Update last candles to live price
     if (candles15m.length > 0) candles15m[candles15m.length-1].close = livePrice;
@@ -230,7 +237,7 @@ async function runSignalAndNotify() {
     const windowCandles1m = candles1m.filter(c => c.time >= currentWindowOpen);
     const betPrice = windowCandles1m.length > 0 ? windowCandles1m[0].open : livePrice;
 
-    const sig = runEngine(candles15m, betPrice, livePrice, null, candles1m);
+    const sig = runEngine(candles15m, betPrice, livePrice, candles1m);
 
     console.log(`Signal: ${sig.signal} | Score: ${sig.score} | Confidence: ${sig.confidence} | ${minsLeft}m left | Last: ${lastSignal}`);
 
@@ -316,9 +323,18 @@ app.get("/api/btc", async (req, res) => {
 
 app.get("/api/signal", async (req, res) => {
   try {
-    const [livePrice, candles] = await Promise.all([getLivePrice(), getCandles(100)]);
-    const betPrice = candles[candles.length-1].open;
-    const sig = runEngine(candles, betPrice, livePrice);
+    const now = Date.now();
+    const currentWindowOpen = Math.floor(now / MS15) * MS15;
+    const [livePrice, candles15m, candles1m] = await Promise.all([
+      getLivePrice(),
+      getCandles(100, "15m"),
+      getCandles(50, "1m")
+    ]);
+    if (candles15m.length > 0) candles15m[candles15m.length-1].close = livePrice;
+    if (candles1m.length > 0)  candles1m[candles1m.length-1].close   = livePrice;
+    const windowCandles = candles1m.filter(c => c.time >= currentWindowOpen);
+    const betPrice = windowCandles.length > 0 ? windowCandles[0].open : livePrice;
+    const sig = runEngine(candles15m, betPrice, livePrice, candles1m);
     res.json({ ...sig, livePrice, betPrice, time: Date.now() });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

@@ -26,8 +26,8 @@ const API_BASE   = "https://btc-backend-production-0738.up.railway.app/api";
 const LOG_KEY    = "btc_trade_log";
 const STREAK_KEY = "btc_streak";
 // ── TELEGRAM ── Fill in after setup ──
-const TG_BOT_TOKEN = ""; // e.g. "7123456789:AAFxxxxxx"
-const TG_CHAT_ID   = ""; // e.g. "123456789"
+const TG_BOT_TOKEN = "7998975335:AAFptLQvgai5uPvojihTmtqgYdgaozhn5Ug";
+const TG_CHAT_ID   = "8632716847";
 const TG_MIN_SCORE = 4;  // notify on any score >= 4
 
 // ═══════════════════════════════════════════════════════════════
@@ -94,7 +94,7 @@ async function fetchBTCData() {
   const [btcRes, candles15mRes, candles1mRes] = await Promise.all([
     fetch(`${API_BASE}/price`),
     fetch(`${API_BASE}/candles?interval=15m&limit=100`),
-    fetch(`${API_BASE}/candles?interval=1m&limit=30`)
+    fetch(`${API_BASE}/candles?interval=1m&limit=50`)
   ]);
   if (!btcRes.ok) throw new Error("Backend error");
   const priceData = await btcRes.json();
@@ -111,10 +111,17 @@ async function fetchBTCData() {
     ? windowCandles1m[0].open
     : (candles15m.length > 0 ? candles15m[candles15m.length-1].open : priceData.price);
 
-  // Update last 15m candle to live price
-  if (candles15m.length > 0) candles15m[candles15m.length-1].close = priceData.price;
-  // Update last 1m candle to live price
-  if (candles1m.length > 0)  candles1m[candles1m.length-1].close   = priceData.price;
+  // Update last candle to live price so indicators reflect right now
+  if (candles15m.length > 0) {
+    candles15m[candles15m.length-1].close = priceData.price;
+    candles15m[candles15m.length-1].high  = Math.max(candles15m[candles15m.length-1].high,  priceData.price);
+    candles15m[candles15m.length-1].low   = Math.min(candles15m[candles15m.length-1].low,   priceData.price);
+  }
+  if (candles1m.length > 0) {
+    candles1m[candles1m.length-1].close = priceData.price;
+    candles1m[candles1m.length-1].high  = Math.max(candles1m[candles1m.length-1].high,  priceData.price);
+    candles1m[candles1m.length-1].low   = Math.min(candles1m[candles1m.length-1].low,   priceData.price);
+  }
 
   return {
     price: priceData.price,
@@ -163,9 +170,31 @@ function calcATR(candles) {
   return {current:trs[trs.length-1]||0,avg:sl.reduce((a,b)=>a+b,0)/(sl.length||1)};
 }
 function calcStructure(candles) {
-  if (candles.length<10) return {trend:"CHOP",swingHigh:0,swingLow:0,prevSwingHigh:0};
-  const s=candles.slice(-10),h=s.map(c=>c.high),l=s.map(c=>c.low),n=h.length-1;
-  return { trend:h[n]>h[n-2]&&h[n-2]>h[n-4]&&l[n]>l[n-2]&&l[n-2]>l[n-4]?"UP":h[n]<h[n-2]&&h[n-2]<h[n-4]&&l[n]<l[n-2]&&l[n-2]<l[n-4]?"DOWN":"CHOP", swingHigh:Math.max(...candles.slice(-5).map(c=>c.high)), swingLow:Math.min(...candles.slice(-5).map(c=>c.low)), prevSwingHigh:Math.max(...candles.slice(-10,-5).map(c=>c.high)) };
+  if (candles.length < 20) return { trend:"CHOP", swingHigh:0, swingLow:0, prevSwingHigh:0 };
+  const s = candles.slice(-20);
+  const closes = s.map(c => c.close);
+  // Quarter-based trend detection
+  const q1 = closes.slice(0,5).reduce((a,b)=>a+b,0)/5;
+  const q2 = closes.slice(5,10).reduce((a,b)=>a+b,0)/5;
+  const q3 = closes.slice(10,15).reduce((a,b)=>a+b,0)/5;
+  const q4 = closes.slice(15,20).reduce((a,b)=>a+b,0)/5;
+  // EMA slope for confirmation
+  const ema10 = emaArr(closes, 10);
+  const emaSlope = ema10[ema10.length-1] - ema10[ema10.length-5];
+  const emaSlopePct = ema10[ema10.length-5] > 0 ? emaSlope / ema10[ema10.length-5] * 100 : 0;
+  const rising  = q2>q1 && q3>q2 && q4>q3;
+  const falling = q2<q1 && q3<q2 && q4<q3;
+  let trend = "CHOP";
+  if      (rising  && emaSlopePct >  0.05) trend = "UP";
+  else if (falling && emaSlopePct < -0.05) trend = "DOWN";
+  else if (emaSlopePct >  0.15) trend = "UP";
+  else if (emaSlopePct < -0.15) trend = "DOWN";
+  return {
+    trend,
+    swingHigh: Math.max(...candles.slice(-10).map(c=>c.high)),
+    swingLow:  Math.min(...candles.slice(-10).map(c=>c.low)),
+    prevSwingHigh: Math.max(...candles.slice(-20,-10).map(c=>c.high))
+  };
 }
 function calcMomentum(candles) {
   if (candles.length<7) return {sameDir:false,expanding:false,dir:"UP"};
@@ -221,46 +250,29 @@ function runEngine(candles, betPrice, livePrice, streak, candles1m) {
   let rawDir=bv>=3?"UP":bvD>=3?"DOWN":bv>=2&&bvD===0?"UP":bvD>=2&&bv===0?"DOWN":"MIXED";
   let revBlock=false;
   if(rawDir==="UP"&&st.trend==="DOWN"&&livePrice<=st.prevSwingHigh){revBlock=true;warnings.push("Reversal filter: lower high not broken");}
-  // ── OPTIMIZED RULES v7 (backtest May 25-26, multi-timeframe) ──
-  // Key findings:
-  // - Score 6+: 100% DOWN in no-bet analysis — rawDir check was blocking them
-  // - Score 7+: 100% DOWN — fire unconditionally if bvD >= bv
-  // - Score 5 + UP trend: 60-67% UP — fire MEDIUM UP
-  // - rawDir was too restrictive — use bv vs bvD comparison instead
+  // ── OPTIMIZED RULES v8 (backtest May 25-26, multi-timeframe) ──
+  // Score 7+: unconditional HIGH — direction from price vs EMA
+  // Score 6: HIGH — direction from MACD + price vs EMA
+  // Score 5: MEDIUM — require clear MACD + EMA alignment
+  const macdBearish = m.macd < m.signal;
+  const macdBullish = m.macd > m.signal;
+  const priceAboveEMA = livePrice > e50;
   let signal="NO BET",confidence="LOW";
 
-  // Determine dominant direction from indicator votes
-  const dominantBear = bvD >= bv;  // more bearish votes than bullish
-  const dominantBull = bv > bvD;   // more bullish votes than bearish
-  const strongBear   = bvD >= 2;
-  const strongBull   = bv >= 2;
-
-  // ── DOWN SIGNALS ──
-  // Score 7+ with any bearish lean = HIGH DOWN
-  if(score>=7&&dominantBear&&!revBlock){
-    signal="DOWN";confidence="HIGH";
+  // Score 7+ = unconditional HIGH signal
+  if(score>=7&&!revBlock){
+    signal=priceAboveEMA?"UP":"DOWN";
+    confidence="HIGH";
   }
-  // Score 6 with bearish lean = HIGH DOWN (100% accurate in no-bet)
-  else if(score===6&&dominantBear&&strongBear&&!revBlock){
-    signal="DOWN";confidence="HIGH";
+  // Score 6 = HIGH — MACD + EMA determine direction
+  else if(score===6&&!revBlock){
+    if(macdBullish&&priceAboveEMA){signal="UP";confidence="HIGH";}
+    else{signal="DOWN";confidence="HIGH";}
   }
-  // Score 5 + DOWN trend + bearish = MEDIUM DOWN
-  else if(score===5&&dominantBear&&strongBear&&st.trend==="DOWN"&&!revBlock){
-    signal="DOWN";confidence="MEDIUM";
-  }
-
-  // ── UP SIGNALS ──
-  // Score 7+ with bullish lean = HIGH UP
-  if(signal==="NO BET"&&score>=7&&dominantBull&&!revBlock){
-    signal="UP";confidence="HIGH";
-  }
-  // Score 6 with bullish lean = HIGH UP
-  else if(signal==="NO BET"&&score===6&&dominantBull&&strongBull&&!revBlock){
-    signal="UP";confidence="HIGH";
-  }
-  // Score 5 + UP trend + bullish = MEDIUM UP (60-67% accurate)
-  else if(signal==="NO BET"&&score===5&&dominantBull&&strongBull&&st.trend==="UP"&&!revBlock){
-    signal="UP";confidence="MEDIUM";
+  // Score 5 = MEDIUM — require clear alignment
+  else if(score===5&&!revBlock){
+    if(macdBullish&&priceAboveEMA){signal="UP";confidence="MEDIUM";}
+    else if(macdBearish&&!priceAboveEMA){signal="DOWN";confidence="MEDIUM";}
   }
   let betSize=0;
   if(signal!=="NO BET"&&streak.losses<4){
@@ -315,7 +327,7 @@ async function runBacktest(onProgress) {
   onProgress(`Found ${windowKeys.length} 15-minute windows. Running majority vote engine...`);
 
   const results = [];
-  const WARMUP_WINDOWS = 3; // need at least 3 prior windows for indicators
+  const WARMUP_WINDOWS = 30; // need 26+ prior 15m candles for MACD
 
   for (let wi = WARMUP_WINDOWS; wi < windowKeys.length - 1; wi++) {
     const windowStart = windowKeys[wi];
@@ -363,7 +375,7 @@ async function runBacktest(onProgress) {
       const livePrice = currentMinCandles[currentMinCandles.length-1].close;
       // Pass 15m candles for MACD/EMA/ATR, 1m candles for trend/momentum
       const sig = runEngine(candlesFor15m, betPrice, livePrice, { wins: 0, losses: 0 }, currentMinCandles);
-      minuteSignals.push({ minute: mi, signal: sig.signal, score: sig.score, confidence: sig.confidence, trend: sig._meta?.st?.trend || "CHOP" });
+      minuteSignals.push({ minute: mi, signal: sig.signal, score: sig.score, confidence: sig.confidence, trend: sig.trend || "CHOP" });
       if (sig.signal === "UP") upVotes.push(sig);
       else if (sig.signal === "DOWN") downVotes.push(sig);
       else noVotes.push(sig);
@@ -378,44 +390,25 @@ async function runBacktest(onProgress) {
     const downVotePct = totalVotes > 0 ? downVotes.length / totalVotes : 0;
     const avgScoreAll = minuteSignals.length > 0 ? Math.round(minuteSignals.reduce((s, v) => s + v.score, 0) / minuteSignals.length) : 0;
 
+    // Use the majority direction — trust the signal engine
     if (upVotes.length > downVotes.length && upVotes.length > noVotes.length) {
-      // UP signals blocked — 0% win rate
-      majoritySignal = "NO BET";
+      majoritySignal = "UP";
       avgScore = Math.round(upVotes.reduce((s, v) => s + v.score, 0) / upVotes.length);
-    } else if (downVotes.length > upVotes.length && downVotes.length >= noVotes.length) {
+      majorityConfidence = upVotes.filter(v => v.confidence === "HIGH").length > upVotes.length / 2 ? "HIGH" : "MEDIUM";
+    } else if (downVotes.length > upVotes.length && downVotes.length > noVotes.length) {
       majoritySignal = "DOWN";
       avgScore = Math.round(downVotes.reduce((s, v) => s + v.score, 0) / downVotes.length);
       majorityConfidence = downVotes.filter(v => v.confidence === "HIGH").length > downVotes.length / 2 ? "HIGH" : "MEDIUM";
-    } else if (downVotePct >= 0.4 && avgScoreAll >= 4) {
-      // RULE: >=40% DOWN votes + avg score>=4 = 100% accurate in backtest
-      majoritySignal = "DOWN";
-      avgScore = avgScoreAll;
-      majorityConfidence = "MEDIUM";
     } else {
+      majoritySignal = "NO BET";
       avgScore = avgScoreAll;
     }
 
-    // CORRECTED LOGIC: Signal during window W predicts window W+1
-    // - Data used: all of window W's 1-minute candles
-    // - Prediction: direction of window W+1
-    // - Bet price: open of window W+1 (= close/open boundary)
-    // - Result: did W+1 close above or below W+1 open?
-    const currentWindowOpen = windowCandles[0].open;
-    const nextWindowOpen  = nextCandles[0].open;  // this is the BET PRICE
-    const nextWindowKey2  = windowKeys[wi + 2];
-    const nextNextCandles = nextWindowKey2 ? windowMap[nextWindowKey2] : null;
-    
-    // Result = did next window go UP or DOWN from its own open?
-    let actualDir = "DOWN";
-    let nextWindowClose = nextWindowOpen;
-    if (nextNextCandles && nextNextCandles.length > 0) {
-      nextWindowClose = nextNextCandles[0].open; // next window's close = window after that's open
-      actualDir = nextWindowClose > nextWindowOpen ? "UP" : "DOWN";
-    } else if (nextCandles.length > 0) {
-      nextWindowClose = nextCandles[nextCandles.length-1].close;
-      actualDir = nextWindowClose > nextWindowOpen ? "UP" : "DOWN";
-    }
-    
+    // Signal uses data from window W to predict direction of window W
+    // Bet price = window W open, result = window W close vs open
+    const windowOpenPrice = windowCandles[0].open;
+    const windowClosePrice = nextCandles[0].open; // next window open = current window close
+    const actualDir = windowClosePrice > windowOpenPrice ? "UP" : "DOWN";
     const signalCorrect = majoritySignal !== "NO BET" ? majoritySignal === actualDir : null;
 
     results.push({
@@ -424,15 +417,14 @@ async function runBacktest(onProgress) {
       confidence: majorityConfidence,
       score: avgScore,
       trend: minuteSignals[minuteSignals.length - 1]?.trend || "CHOP",
-      openPrice: currentWindowOpen,
-      closePrice: nextWindowOpen,   // bet price = next window open
-      nextClose: nextWindowClose,
+      openPrice: windowOpenPrice,
+      closePrice: windowClosePrice,
+      nextClose: windowClosePrice,
       actualDir,
       signalCorrect,
       betPlaced: majoritySignal !== "NO BET",
       voteBreakdown,
       totalMinutes: windowCandles.length,
-      note: "Signal during W predicts W+1 direction",
     });
 
     if (wi % 10 === 0) onProgress(`Processed ${wi}/${windowKeys.length} windows...`);
@@ -799,7 +791,7 @@ function BTCDecisionEngine() {
     try {
       let data;
       try { data = await fetchBTCData(); }
-      catch(e) { setLoadMsg("Backend unreachable — using synthetic data"); data = generateSynthetic(77000,100); }
+      catch(e) { setLoadMsg("Backend unreachable — using synthetic data"); data = generateSynthetic(77000,100); data.candles1m = []; }
       setLoadMsg("Running scoring engine...");
       setSource(data.source);
       const sk = streak;
@@ -808,8 +800,7 @@ function BTCDecisionEngine() {
       out._meta.candleOpenTime  = data.candleOpenTime;
       out._meta.candleCloseTime = data.candleCloseTime;
       out._meta.msUntilClose    = data.msUntilClose;
-      out._meta.lookbackStart   = data.lookbackStart;
-      out._meta.lookbackMinutes = data.lookbackMinutes;
+
       setResult(out);
       setLastRefresh(new Date());
       setMsLeft(data.msUntilClose || msUntilNextBoundary());
