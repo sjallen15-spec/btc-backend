@@ -7,6 +7,13 @@
   <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script>
+    window.onerror = function(msg, src, line, col, err) {
+      document.getElementById('root').innerHTML = 
+        '<div style="color:#ff4d6a;padding:20px;font-family:monospace;background:#07090f;min-height:100vh">' +
+        '<h2>Error loading app</h2><pre>' + msg + '\nLine: ' + line + '</pre></div>';
+    };
+  </script>
   <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Bebas+Neue&display=swap" rel="stylesheet"/>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -15,7 +22,7 @@
 </head>
 <body>
   <div id="root"></div>
-  <script type="text/babel">
+  <script type="text/babel" data-presets="react">
 const { useState, useEffect, useCallback, useRef } = React;
 
 
@@ -849,7 +856,7 @@ function BTCDecisionEngine() {
           </div>
         )}
 
-        {/* ── EXPORT TAB ── */}
+        {/* BACKTEST TAB */}
         {tab==="backtest"&&(
           <div className="fi">
             <div className="card" style={{marginBottom:12}}>
@@ -879,20 +886,20 @@ function BTCDecisionEngine() {
                   } catch(e){alert("Backtest failed: "+e.message);}
                   finally{setLoading(false);setLoadMsg("");}
                 }}>
-                ▶ RUN BACKTEST
+                RUN BACKTEST
               </button>
             </div>
             <div className="card" style={{borderColor:`${BLUE}33`}}>
               <div style={{fontSize:9,color:FG4,letterSpacing:".15em",marginBottom:12}}>TELEGRAM</div>
               <div style={{fontSize:12,color:FG2,lineHeight:1.9}}>
-                Telegram notifications are configured on the Railway backend and fire automatically every minute when a signal appears or changes (score ≥ 4).
+                Telegram notifications are configured on the Railway backend and fire automatically every minute when a signal appears or changes (score 4+).
                 <div style={{marginTop:10,color:AMBER}}>Bot: @MmyyBTCsignal_bot</div>
               </div>
             </div>
           </div>
         )}
 
-        {tab==="export"&&(
+        {/* EXPORT TAB */}
           <div className="fi">
             <div className="card" style={{marginBottom:12}}>
               <div style={{fontSize:9,color:FG4,letterSpacing:".15em",marginBottom:12}}>EXPORT TRADE DATA</div>
