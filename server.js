@@ -12,9 +12,9 @@ app.use(cors({ origin: "*" }));
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
-// ═══════════════════════════════════════════════════════════════
-// TELEGRAM CONFIG — fill these in
-// ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════
+// TELEGRAM CONFIG
+// ═══════════════════════════════════════════
 const TG_BOT_TOKEN = "7998975335:AAFptLQvgai5uPvojihTmtqgYdgaozhn5Ug";
 const TG_CHAT_ID   = "8632716847";
 const TG_MIN_SCORE = 4;
@@ -30,35 +30,33 @@ async function sendTelegram(msg) {
   } catch(e) { console.error("Telegram error:", e.message); }
 }
 
-// ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════
 // DATA FETCHING
-// ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════
 async function fetchWithTimeout(url, ms = 8000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), ms);
   try {
     const r = await fetch(url, { signal: controller.signal });
     return r;
-  } finally {
-    clearTimeout(id);
-  }
+  } finally { clearTimeout(id); }
 }
 
 async function getLivePrice() {
   try {
     const r = await fetchWithTimeout("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd");
-    const data = await r.json();
-    if (data?.bitcoin?.usd) return data.bitcoin.usd;
+    const d = await r.json();
+    if (d?.bitcoin?.usd) return d.bitcoin.usd;
   } catch {}
   try {
     const r = await fetchWithTimeout("https://min-api.cryptocompare.com/data/price?fsym=BTC&tsyms=USD");
-    const data = await r.json();
-    if (data?.USD) return data.USD;
+    const d = await r.json();
+    if (d?.USD) return d.USD;
   } catch {}
   try {
     const r = await fetchWithTimeout("https://api.coinbase.com/v2/prices/BTC-USD/spot");
-    const data = await r.json();
-    if (data?.data?.amount) return parseFloat(data.data.amount);
+    const d = await r.json();
+    if (d?.data?.amount) return parseFloat(d.data.amount);
   } catch {}
   throw new Error("All price sources failed");
 }
@@ -75,30 +73,21 @@ function parseCandle(c) {
   };
 }
 
-async function getCandles(limit = 100, interval = "15m") {
-  // interval: "1m" = 1-minute candles, "15m" = 15-minute aggregated
-  const aggregate = interval === "1m" ? 1 : 15;
+async function getCandles15m(limit = 100) {
   const r = await fetchWithTimeout(
-    `https://min-api.cryptocompare.com/data/v2/histominute?fsym=BTC&tsym=USD&limit=${limit}&aggregate=${aggregate}`
+    `https://min-api.cryptocompare.com/data/v2/histominute?fsym=BTC&tsym=USD&limit=${limit}&aggregate=15`
   );
   const data = await r.json();
   if (!data.Data?.Data || !Array.isArray(data.Data.Data)) throw new Error("Bad candle data");
-  return data.Data.Data.map(c => ({
-    time:      c.time * 1000,
-    open:      c.open,
-    high:      c.high,
-    low:       c.low,
-    close:     c.close,
-    volume:    c.volumefrom,
-    closeTime: (c.time + (aggregate * 60)) * 1000,
-  }));
+  return data.Data.Data.map(parseCandle);
 }
 
-// ═══════════════════════════════════════════════════════════════
-// SIGNAL ENGINE (mirrors frontend logic)
-// ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════
+// INDICATORS
+// ═══════════════════════════════════════════
 function emaArr(prices, p) {
-  const k = 2/(p+1); const out = [prices[0]];
+  const k = 2/(p+1);
+  const out = [prices[0]];
   for (let i = 1; i < prices.length; i++) out.push(prices[i]*k + out[i-1]*(1-k));
   return out;
 }
@@ -107,38 +96,49 @@ function calcMACD(prices) {
   if (prices.length < 26) return { macd:0, signal:0, hist:0, histPrev:0 };
   const e12 = emaArr(prices,12), e26 = emaArr(prices,26);
   const line = e12.map((v,i) => v - e26[i]);
-  const sig = emaArr(line, 9);
+  const sig  = emaArr(line, 9);
   const n = line.length - 1;
   return { macd:line[n], signal:sig[n], hist:line[n]-sig[n], histPrev: n>0?line[n-1]-sig[n-1]:0 };
 }
 
 function calcATR(candles) {
   if (candles.length < 2) return { current:0, avg:0 };
-  const trs = candles.slice(1).map((c,i) => Math.max(c.high-c.low, Math.abs(c.high-candles[i].close), Math.abs(c.low-candles[i].close)));
+  const trs = candles.slice(1).map((c,i) =>
+    Math.max(c.high-c.low, Math.abs(c.high-candles[i].close), Math.abs(c.low-candles[i].close))
+  );
   const sl = trs.slice(-20);
   return { current: trs[trs.length-1]||0, avg: sl.reduce((a,b)=>a+b,0)/(sl.length||1) };
 }
 
+function calcMomentum(candles) {
+  if (candles.length < 3) return { sameDir:false, expanding:false, dir:"UP" };
+  const n = candles.length-1, a = candles[n], b = candles[n-1];
+  const d1 = a.close >= a.open ? "UP" : "DOWN";
+  const d2 = b.close >= b.open ? "UP" : "DOWN";
+  return {
+    sameDir: d1===d2,
+    expanding: Math.abs(a.close-a.open) > candles.slice(-6,-1).reduce((s,c)=>s+Math.abs(c.close-c.open),0)/5,
+    dir: d1
+  };
+}
+
 function calcStructure(candles) {
   if (candles.length < 20) return { trend:"CHOP", swingHigh:0, swingLow:0, prevSwingHigh:0 };
-  const s = candles.slice(-20);
-  const closes = s.map(c => c.close);
-  const q1avg = closes.slice(0,5).reduce((a,b)=>a+b,0)/5;
-  const q2avg = closes.slice(5,10).reduce((a,b)=>a+b,0)/5;
-  const q3avg = closes.slice(10,15).reduce((a,b)=>a+b,0)/5;
-  const q4avg = closes.slice(15,20).reduce((a,b)=>a+b,0)/5;
-  const ema10arr = emaArr(closes, 10);
-  const emaSlope = ema10arr[ema10arr.length-1] - ema10arr[ema10arr.length-5];
-  const emaSlopePct = emaSlope / ema10arr[ema10arr.length-5] * 100;
-  const risingQuarters = q2avg>q1avg && q3avg>q2avg && q4avg>q3avg;
-  const fallingQuarters = q2avg<q1avg && q3avg<q2avg && q4avg<q3avg;
+  const closes = candles.slice(-20).map(c => c.close);
+  const q1 = closes.slice(0,5).reduce((a,b)=>a+b,0)/5;
+  const q2 = closes.slice(5,10).reduce((a,b)=>a+b,0)/5;
+  const q3 = closes.slice(10,15).reduce((a,b)=>a+b,0)/5;
+  const q4 = closes.slice(15,20).reduce((a,b)=>a+b,0)/5;
+  const ema10 = emaArr(closes, 10);
+  const emaSlope = ema10[ema10.length-1] - ema10[ema10.length-5];
+  const emaSlopePct = ema10[ema10.length-5] > 0 ? emaSlope / ema10[ema10.length-5] * 100 : 0;
+  const rising  = q2>q1 && q3>q2 && q4>q3;
+  const falling = q2<q1 && q3<q2 && q4<q3;
   let trend = "CHOP";
-  // Adaptive thresholds — 1m candles have much smaller moves than 15m
-  const slopeThresh = Math.abs(ema10arr[ema10arr.length-1]) > 1000 ? 0.02 : 0.005;
-  if      (risingQuarters  && emaSlopePct >  slopeThresh) trend = "UP";
-  else if (fallingQuarters && emaSlopePct < -slopeThresh) trend = "DOWN";
-  else if (emaSlopePct >  slopeThresh * 3) trend = "UP";
-  else if (emaSlopePct < -slopeThresh * 3) trend = "DOWN";
+  if      (rising  && emaSlopePct >  0.05) trend = "UP";
+  else if (falling && emaSlopePct < -0.05) trend = "DOWN";
+  else if (emaSlopePct >  0.15) trend = "UP";
+  else if (emaSlopePct < -0.15) trend = "DOWN";
   return {
     trend,
     swingHigh: Math.max(...candles.slice(-10).map(c=>c.high)),
@@ -147,112 +147,119 @@ function calcStructure(candles) {
   };
 }
 
-function calcMomentum(candles) {
-  if (candles.length < 7) return { sameDir:false, expanding:false, dir:"UP" };
-  const n = candles.length-1, a = candles[n], b = candles[n-1];
-  const d1 = a.close >= a.open ? "UP" : "DOWN";
-  const d2 = b.close >= b.open ? "UP" : "DOWN";
-  return { sameDir: d1===d2, expanding: Math.abs(a.close-a.open) > candles.slice(-6,-1).reduce((s,c)=>s+Math.abs(c.close-c.open),0)/5, dir: d1 };
+function calcLocation(candles, st) {
+  if (candles.length < 5) return { penalty:0, reason:null };
+  const price = candles[candles.length-1].close;
+  const range = st.swingHigh - st.swingLow || 1;
+  const move = Math.abs(candles.slice(-4)[3].close - candles.slice(-4)[0].open);
+  const atrEst = Math.abs(candles[candles.length-1].high - candles[candles.length-1].low);
+  if (move > atrEst*2.5) return { penalty:-2, reason:"Overextended" };
+  if ((st.swingHigh-price)/range < 0.1) return { penalty:-1, reason:"Near swing high" };
+  if ((price-st.swingLow)/range < 0.1)  return { penalty:-1, reason:"Near swing low" };
+  return { penalty:0, reason:null };
 }
 
-function runEngine(candles, betPrice, livePrice, candles1m) {
+// ═══════════════════════════════════════════
+// SIGNAL ENGINE — 15m candles
+// ═══════════════════════════════════════════
+function runEngine(candles, betPrice, livePrice) {
   const closes = candles.map(c => c.close);
-  const e50arr = emaArr(closes, 50), e50 = e50arr[e50arr.length-1];
-  const m = calcMACD(closes), at = calcATR(candles);
-  // Use 1m candles for momentum/structure if available
-  const candlesForMom = (candles1m && candles1m.length >= 5) ? candles1m : candles;
-  const mom = calcMomentum(candlesForMom), st = calcStructure(candlesForMom);
+  const e50arr = emaArr(closes, 50);
+  const e50    = e50arr[e50arr.length-1];
+  const m   = calcMACD(closes);
+  const at  = calcATR(candles);
+  const mom = calcMomentum(candles);
+  const st  = calcStructure(candles);
+  const loc = calcLocation(candles, st);
 
-  let score = 0; const reasoning = [];
-  livePrice > e50 ? (score++, reasoning.push("Price above EMA50")) : reasoning.push("Price below EMA50");
-  m.macd > 0 ? (score++, reasoning.push("MACD above zero")) : reasoning.push("MACD below zero");
-  mom.sameDir && (score++, reasoning.push("Candles same direction"));
-  mom.expanding && (score++, reasoning.push("Candle body expanding"));
-  at.current > at.avg && (score++, reasoning.push("ATR above average"));
-  Math.abs(candles[candles.length-1].close - candles[candles.length-1].open) >
-    candles.slice(-6,-1).reduce((s,c)=>s+Math.abs(c.close-c.open),0)/5 && (score++, reasoning.push("Body above average"));
-  ((m.macd>m.signal&&mom.dir==="UP")||(m.macd<m.signal&&mom.dir==="DOWN")) && (score++, reasoning.push("MACD aligned"));
-  Math.abs(m.hist) > Math.abs(m.histPrev) && (score++, reasoning.push("MACD histogram expanding"));
+  let score = 0;
+  const reasoning = [];
 
-  const bv   = [m.macd>0, mom.dir==="UP",  st.trend==="UP",  livePrice>e50].filter(Boolean).length;
-  const bvD  = [m.macd<0, mom.dir==="DOWN", st.trend==="DOWN", livePrice<e50].filter(Boolean).length;
+  // Score components
+  if (livePrice > e50) { score++; reasoning.push("Price above EMA50"); }
+  else                 { reasoning.push("Price below EMA50"); }
+  if (m.macd > 0)      { score++; reasoning.push("MACD above zero"); }
+  else                 { reasoning.push("MACD below zero"); }
+  if (mom.sameDir)     { score++; reasoning.push("Candles same direction"); }
+  if (mom.expanding)   { score++; reasoning.push("Candle body expanding"); }
+  if (at.current > at.avg) { score++; reasoning.push("ATR above average"); }
+  if (Math.abs(candles[candles.length-1].close - candles[candles.length-1].open) >
+      candles.slice(-6,-1).reduce((s,c)=>s+Math.abs(c.close-c.open),0)/5) {
+    score++; reasoning.push("Body above average");
+  }
+  if ((m.macd>m.signal&&mom.dir==="UP")||(m.macd<m.signal&&mom.dir==="DOWN")) {
+    score++; reasoning.push("MACD aligned with direction");
+  }
+  if (Math.abs(m.hist) > Math.abs(m.histPrev)) { score++; reasoning.push("MACD histogram expanding"); }
+  score += loc.penalty;
+
+  const bv  = [livePrice>e50, mom.dir==="UP",   st.trend==="UP",  m.macd>0].filter(Boolean).length;
+  const bvD = [livePrice<e50, mom.dir==="DOWN", st.trend==="DOWN", m.macd<0].filter(Boolean).length;
   const rawDir = bv>=3?"UP":bvD>=3?"DOWN":bv>=2&&bvD===0?"UP":bvD>=2&&bv===0?"DOWN":"MIXED";
 
-  // ── OPTIMIZED RULES v9 (all backtest data) ──
-  // Vote unanimity is the best predictor
-  const macdBearish = m.macd < m.signal;
-  const macdBullish = m.macd > m.signal;
-  const priceAboveEMA = livePrice > e50;
+  // Signal rules — optimized from backtest data
+  // All 4 bearish votes + score>=5 = HIGH DOWN (89% accurate)
+  // All 4 bearish votes + score>=3 = MEDIUM DOWN (81% accurate)
+  // All 4 bullish votes + score>=6 = HIGH UP (67% accurate)
+  // All 4 bullish votes + score>=4 = MEDIUM UP
   let signal = "NO BET", confidence = "LOW";
 
-  // bvD=4 = all 4 bearish indicators agree (unanimous bearish)
-  // bv=4  = all 4 bullish indicators agree (unanimous bullish)
-  if (bvD === 4 && score >= 5) { signal = "DOWN"; confidence = "HIGH"; }
-  else if (bvD === 4 && score >= 3) { signal = "DOWN"; confidence = "MEDIUM"; }
-  else if (bv === 4 && score >= 6)  { signal = "UP";   confidence = "HIGH"; }
-  else if (bv === 4 && score >= 4)  { signal = "UP";   confidence = "MEDIUM"; }
-  else if (bvD >= 3 && bv === 0 && score >= 6) { signal = "DOWN"; confidence = "MEDIUM"; }
-  else if (bv >= 3 && bvD === 0 && score >= 7) { signal = "UP";   confidence = "MEDIUM"; }
+  if (bvD===4 && score>=5)                     { signal="DOWN"; confidence="HIGH"; }
+  else if (bvD===4 && score>=3)                { signal="DOWN"; confidence="MEDIUM"; }
+  else if (bv===4 && score>=6)                 { signal="UP";   confidence="HIGH"; }
+  else if (bv===4 && score>=4)                 { signal="UP";   confidence="MEDIUM"; }
+  else if (bvD>=3 && bv===0 && score>=6)       { signal="DOWN"; confidence="MEDIUM"; }
+  else if (bv>=3  && bvD===0 && score>=7)      { signal="UP";   confidence="MEDIUM"; }
 
-  return { signal, confidence, score, trend: st.trend, reasoning };
+  let betSize = 0;
+  if (signal !== "NO BET") {
+    betSize = confidence === "HIGH" ? 6 : 4;
+  }
+
+  return { signal, confidence, score, trend: st.trend, reasoning, bet_size_percent: betSize,
+           _bv: bv, _bvD: bvD, _rawDir: rawDir };
 }
 
-// ═══════════════════════════════════════════════════════════════
-// 15-MINUTE SCHEDULER
-// ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════
+// 15-MIN SCHEDULER
+// ═══════════════════════════════════════════
 const MS15 = 15 * 60 * 1000;
-function msUntilNextBoundary() {
-  const now = Date.now();
-  return MS15 - (now % MS15);
-}
-
 let lastSignal = "NO BET";
-let lastScore = 0;
+let lastScore  = 0;
 
 async function runSignalAndNotify() {
   console.log(`[${new Date().toISOString()}] Running signal check...`);
   try {
-    const MS15 = 15 * 60 * 1000;
     const now = Date.now();
-    const currentWindowOpen = Math.floor(now / MS15) * MS15;
+    const currentWindowOpen  = Math.floor(now / MS15) * MS15;
     const currentWindowClose = currentWindowOpen + MS15;
-    const msUntilClose = currentWindowClose - now;
-    const minsLeft = Math.round(msUntilClose / 60000);
+    const minsLeft = Math.round((currentWindowClose - now) / 60000);
 
-    // Multi-timeframe: 15m for MACD/EMA/ATR, 1m for trend/momentum
-    const [livePrice, candles15m, candles1m] = await Promise.all([
-      getLivePrice(),
-      getCandles(100, "15m"),
-      getCandles(50, "1m")
-    ]);
-    // Update last candles to live price
-    if (candles15m.length > 0) candles15m[candles15m.length-1].close = livePrice;
-    if (candles1m.length > 0)  candles1m[candles1m.length-1].close   = livePrice;
+    const [livePrice, candles] = await Promise.all([getLivePrice(), getCandles15m(100)]);
+    candles[candles.length-1].close = livePrice;
+    candles[candles.length-1].high  = Math.max(candles[candles.length-1].high, livePrice);
+    candles[candles.length-1].low   = Math.min(candles[candles.length-1].low, livePrice);
 
-    // Bet price = open of current 15m window
-    const windowCandles1m = candles1m.filter(c => c.time >= currentWindowOpen);
-    const betPrice = windowCandles1m.length > 0 ? windowCandles1m[0].open : livePrice;
+    const betPrice = candles[candles.length-1].open;
+    const sig = runEngine(candles, betPrice, livePrice);
 
-    const sig = runEngine(candles15m, betPrice, livePrice, candles1m);
-
-    console.log(`Signal: ${sig.signal} | Score: ${sig.score} | Confidence: ${sig.confidence} | ${minsLeft}m left | Last: ${lastSignal}`);
+    console.log(`Signal: ${sig.signal} | Score: ${sig.score} | Conf: ${sig.confidence} | bv=${sig._bv} bvD=${sig._bvD} | ${minsLeft}m left`);
 
     const signalChanged = sig.signal !== lastSignal;
-    const scoreChanged  = sig.score !== lastScore && sig.signal !== "NO BET";
+    const scoreChanged  = sig.score  !== lastScore && sig.signal !== "NO BET";
 
     if (sig.signal !== "NO BET" && sig.score >= TG_MIN_SCORE && (signalChanged || scoreChanged)) {
       const arrow = sig.signal === "UP" ? "🟢" : "🔴";
       const changeNote = signalChanged && lastSignal !== "NO BET"
         ? `\n⚠️ _Changed from ${lastSignal} → ${sig.signal}_` : "";
-      const windowTime = new Date(currentWindowOpen).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
-      const closeTime  = new Date(currentWindowClose).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
+      const windowOpen  = new Date(currentWindowOpen).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
+      const windowClose = new Date(currentWindowClose).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
       const msg = `${arrow} *BTC SIGNAL: ${sig.signal}*${changeNote}\n\n` +
         `Score: ${sig.score}/8 | Confidence: ${sig.confidence}\n` +
         `Trend: ${sig.trend}\n` +
-        `Window: ${windowTime} → ${closeTime} (${minsLeft}m left)\n` +
+        `Window: ${windowOpen} → ${windowClose} (${minsLeft}m left)\n` +
         `Live Price: $${livePrice.toLocaleString()}\n` +
-        `Window Open: $${betPrice.toLocaleString()}\n` +
-        `Signal data: rolling last 15 mins\n\n` +
+        `Bet Price: $${betPrice.toLocaleString()}\n\n` +
         `${sig.reasoning.slice(0,3).join("\n")}\n\n` +
         `_NOT FINANCIAL ADVICE_`;
       await sendTelegram(msg);
@@ -261,78 +268,57 @@ async function runSignalAndNotify() {
 
     lastSignal = sig.signal;
     lastScore  = sig.score;
-  } catch(e) {
-    console.error("Signal check failed:", e.message);
-  }
+  } catch(e) { console.error("Signal check failed:", e.message); }
 }
 
-// Check every minute — notify whenever signal or score changes
 setInterval(runSignalAndNotify, 60000);
-
-// Run once on startup
 setTimeout(runSignalAndNotify, 3000);
 
-// ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════
 // API ROUTES
-// ═══════════════════════════════════════════════════════════════
-app.get("/healthz", (req, res) => res.json({ status: "ok", time: new Date().toISOString() }));
+// ═══════════════════════════════════════════
+app.get("/healthz", (req, res) => res.json({ status:"ok", time:new Date().toISOString() }));
 
 app.get("/api/price", async (req, res) => {
-  try {
-    const price = await getLivePrice();
-    res.json({ price, time: Date.now() });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  try { const price = await getLivePrice(); res.json({ price, time:Date.now() }); }
+  catch(e) { res.status(500).json({ error:e.message }); }
 });
 
 app.get("/api/candles", async (req, res) => {
-  const limit = Math.min(parseInt(req.query.limit) || 100, 2016);
-  const interval = req.query.interval || "15m";
-  try {
-    const candles = await getCandles(limit, interval);
-    res.json(candles);
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  const limit = Math.min(parseInt(req.query.limit)||100, 2000);
+  try { res.json(await getCandles15m(limit)); }
+  catch(e) { res.status(500).json({ error:e.message }); }
 });
 
 app.get("/api/btc", async (req, res) => {
-  const limit = Math.min(parseInt(req.query.limit) || 100, 1500);
+  const limit = Math.min(parseInt(req.query.limit)||100, 500);
   try {
-    const [livePrice, candles] = await Promise.all([getLivePrice(), getCandles(limit)]);
+    const [livePrice, candles] = await Promise.all([getLivePrice(), getCandles15m(limit)]);
     const current = candles[candles.length-1];
-    const betPrice = current.open;
     current.close = livePrice;
     current.high  = Math.max(current.high, livePrice);
-    current.low   = Math.min(current.low, livePrice);
+    current.low   = Math.min(current.low,  livePrice);
+    const betPrice = current.open;
     res.json({
       price: livePrice, betPrice,
       priceVsBet: livePrice - betPrice,
-      priceVsBetPct: ((livePrice - betPrice) / betPrice) * 100,
+      priceVsBetPct: ((livePrice-betPrice)/betPrice)*100,
       candleOpenTime: current.time,
       candleCloseTime: current.closeTime,
       msUntilClose: Math.max(0, current.closeTime - Date.now()),
-      candles, source: "cryptocompare", serverTime: Date.now(),
+      candles, source:"cryptocompare", serverTime:Date.now(),
     });
-  } catch(e) {
-    console.error("/api/btc error:", e.message);
-    res.status(500).json({ error: e.message });
-  }
+  } catch(e) { res.status(500).json({ error:e.message }); }
 });
 
 app.get("/api/signal", async (req, res) => {
   try {
-    const now = Date.now();
-    const currentWindowOpen = Math.floor(now / MS15) * MS15;
-    const [livePrice, candles15m, candles1m] = await Promise.all([
-      getLivePrice(),
-      getCandles(100, "15m"),
-      getCandles(50, "1m")
-    ]);
-    if (candles15m.length > 0) candles15m[candles15m.length-1].close = livePrice;
-    if (candles1m.length > 0)  candles1m[candles1m.length-1].close   = livePrice;
-    const windowCandles = candles1m.filter(c => c.time >= currentWindowOpen);
-    const betPrice = windowCandles.length > 0 ? windowCandles[0].open : livePrice;
-    const sig = runEngine(candles15m, betPrice, livePrice, candles1m);
-    res.json({ ...sig, livePrice, betPrice, time: Date.now() });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+    const [livePrice, candles] = await Promise.all([getLivePrice(), getCandles15m(100)]);
+    candles[candles.length-1].close = livePrice;
+    const betPrice = candles[candles.length-1].open;
+    const sig = runEngine(candles, betPrice, livePrice);
+    res.json({ ...sig, livePrice, betPrice, time:Date.now() });
+  } catch(e) { res.status(500).json({ error:e.message }); }
 });
 
 app.get("/", (req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));

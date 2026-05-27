@@ -22,50 +22,34 @@ const { useState, useEffect, useCallback, useRef } = React;
 // ═══════════════════════════════════════════════════════════════
 // CONFIG
 // ═══════════════════════════════════════════════════════════════
-const API_BASE   = "https://btc-backend-production-0738.up.railway.app/api";
-const LOG_KEY    = "btc_trade_log";
+const API_BASE = "https://btc-backend-production-0738.up.railway.app";
+const LOG_KEY  = "btc_trade_log";      // persistent storage key
 const STREAK_KEY = "btc_streak";
-// ── TELEGRAM ── Fill in after setup ──
-const TG_BOT_TOKEN = "7998975335:AAFptLQvgai5uPvojihTmtqgYdgaozhn5Ug";
-const TG_CHAT_ID   = "8632716847";
-const TG_MIN_SCORE = 4;  // notify on any score >= 4
 
 // ═══════════════════════════════════════════════════════════════
 // 15-MINUTE WINDOW UTILITIES
 // ═══════════════════════════════════════════════════════════════
 const MS15 = 15 * 60 * 1000;
-function current15mOpenTime(now = Date.now()) { return Math.floor(now / MS15) * MS15; }
-function current15mCloseTime(now = Date.now()) { return current15mOpenTime(now) + MS15; }
-function msUntilNextBoundary(now = Date.now()) { return current15mCloseTime(now) - now; }
+
+function current15mOpenTime(now = Date.now()) {
+  return Math.floor(now / MS15) * MS15;
+}
+function current15mCloseTime(now = Date.now()) {
+  return current15mOpenTime(now) + MS15;
+}
+function msUntilNextBoundary(now = Date.now()) {
+  return current15mCloseTime(now) - now;
+}
 function formatCountdown(ms) {
   if (ms <= 0) return "00:00";
   const s = Math.floor(ms / 1000);
   return `${Math.floor(s/60).toString().padStart(2,"0")}:${(s%60).toString().padStart(2,"0")}`;
 }
-function fmtTime(ms) { return new Date(ms).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}); }
-function fmtDate(ms) { return new Date(ms).toLocaleDateString([],{month:"short",day:"numeric"}); }
-
-// ═══════════════════════════════════════════════════════════════
-// TELEGRAM NOTIFICATION
-// ═══════════════════════════════════════════════════════════════
-async function sendTelegramAlert(sig, price, betPrice) {
-  if (!TG_BOT_TOKEN || !TG_CHAT_ID) return;
-  const arrow = sig.signal === "UP" ? "🟢" : sig.signal === "DOWN" ? "🔴" : "⚪";
-  const msg = `${arrow} *BTC SIGNAL: ${sig.signal}*\n\n` +
-    `Score: ${sig.score}/8 | Confidence: ${sig.confidence}\n` +
-    `Bet Size: ${sig.bet_size_percent}%\n` +
-    `Live Price: $${price.toLocaleString()}\n` +
-    `Bet Price: $${betPrice.toLocaleString()}\n` +
-    `Trend: ${sig.trend}\n\n` +
-    `_${sig.reasoning.slice(0,3).join(" · ")}_\n\n` +
-    `_NOT FINANCIAL ADVICE_`;
-  try {
-    await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: TG_CHAT_ID, text: msg, parse_mode: "Markdown" })
-    });
-  } catch(e) { console.warn("Telegram alert failed:", e.message); }
+function fmtTime(ms) {
+  return new Date(ms).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
+}
+function fmtDate(ms) {
+  return new Date(ms).toLocaleDateString([],{month:"short",day:"numeric"});
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -74,12 +58,15 @@ async function sendTelegramAlert(sig, price, betPrice) {
 async function loadLog() {
   try { const v = localStorage.getItem(LOG_KEY); return v ? JSON.parse(v) : []; } catch { return []; }
 }
+
 async function saveLog(log) {
   try { localStorage.setItem(LOG_KEY, JSON.stringify(log)); } catch(e) { console.error("Storage save failed:", e); }
 }
+
 async function loadStreak() {
   try { const v = localStorage.getItem(STREAK_KEY); return v ? JSON.parse(v) : { wins:0, losses:0 }; } catch { return { wins:0, losses:0 }; }
 }
+
 async function saveStreak(streak) {
   try { localStorage.setItem(STREAK_KEY, JSON.stringify(streak)); } catch {}
 }
@@ -88,64 +75,30 @@ async function saveStreak(streak) {
 // DATA FETCH
 // ═══════════════════════════════════════════════════════════════
 async function fetchBTCData() {
-  // Multi-timeframe fetch:
-  // - 15m candles (100): for MACD, EMA50, ATR — need bigger candles for meaningful values
-  // - 1m candles (30): for recent trend/momentum — captures what happened in last 15 mins
-  const [btcRes, candles15mRes, candles1mRes] = await Promise.all([
-    fetch(`${API_BASE}/price`),
-    fetch(`${API_BASE}/candles?interval=15m&limit=100`),
-    fetch(`${API_BASE}/candles?interval=1m&limit=50`)
-  ]);
-  if (!btcRes.ok) throw new Error("Backend error");
-  const priceData = await btcRes.json();
-  const candles15m = candles15mRes.ok ? await candles15mRes.json() : [];
-  const candles1m  = candles1mRes.ok  ? await candles1mRes.json()  : [];
-
-  const now = Date.now();
-  const currentWindowOpen  = current15mOpenTime(now);
-  const currentWindowClose = current15mCloseTime(now);
-
-  // Bet price = open of current 15m window
-  const windowCandles1m = candles1m.filter(c => c.time >= currentWindowOpen);
-  const betPrice = windowCandles1m.length > 0
-    ? windowCandles1m[0].open
-    : (candles15m.length > 0 ? candles15m[candles15m.length-1].open : priceData.price);
-
-  // Update last candle to live price so indicators reflect right now
-  if (candles15m.length > 0) {
-    candles15m[candles15m.length-1].close = priceData.price;
-    candles15m[candles15m.length-1].high  = Math.max(candles15m[candles15m.length-1].high,  priceData.price);
-    candles15m[candles15m.length-1].low   = Math.min(candles15m[candles15m.length-1].low,   priceData.price);
-  }
-  if (candles1m.length > 0) {
-    candles1m[candles1m.length-1].close = priceData.price;
-    candles1m[candles1m.length-1].high  = Math.max(candles1m[candles1m.length-1].high,  priceData.price);
-    candles1m[candles1m.length-1].low   = Math.min(candles1m[candles1m.length-1].low,   priceData.price);
-  }
-
-  return {
-    price: priceData.price,
-    betPrice,
-    candles: candles15m,    // 15m candles for MACD/EMA/ATR
-    candles1m,              // 1m candles for trend/momentum
-    candleOpenTime: currentWindowOpen,
-    candleCloseTime: currentWindowClose,
-    msUntilClose: currentWindowClose - now,
-    source: "cryptocompare",
-  };
+  const r = await fetch(`${API_BASE}/btc?interval=15m&limit=100`);
+  if (!r.ok) throw new Error(`Backend error: ${r.status}`);
+  return r.json();
 }
 
-function generateSynthetic(basePrice = 77000, count = 100) {
-  const now = Date.now(); const latestOpen = current15mOpenTime(now); const candles = []; let price = basePrice;
+function generateSynthetic(basePrice = 103000, count = 100) {
+  const now = Date.now();
+  const latestOpen = current15mOpenTime(now);
+  const candles = [];
+  let price = basePrice;
   for (let i = 0; i < count; i++) {
-    const openTime = latestOpen + (i - (count-1)) * MS15; const closeTime = openTime + MS15 - 1;
-    const drift = [0.0008,0.0002,-0.0006,0.0001][Math.floor(i/15)%4]; const vol = 0.005 + Math.random()*0.004;
-    const open = price; const close = open*(1+drift+(Math.random()-0.48)*vol);
-    const high = Math.max(open,close)+open*Math.random()*0.003; const low = Math.min(open,close)-open*Math.random()*0.003;
+    const openTime  = latestOpen + (i - (count-1)) * MS15;
+    const closeTime = openTime + MS15 - 1;
+    const drift = [0.0008,0.0002,-0.0006,0.0001][Math.floor(i/15)%4];
+    const vol   = 0.005 + Math.random()*0.004;
+    const open  = price;
+    const close = open*(1+drift+(Math.random()-0.48)*vol);
+    const high  = Math.max(open,close)+open*Math.random()*0.003;
+    const low   = Math.min(open,close)-open*Math.random()*0.003;
     candles.push({ time:openTime, closeTime, open:+open.toFixed(2), high:+high.toFixed(2), low:+low.toFixed(2), close:+close.toFixed(2), volume:+(600+Math.random()*900).toFixed(2) });
     price = close;
   }
-  const currentOpen = candles[candles.length-1].open; const livePrice = currentOpen*(1+(Math.random()-0.5)*0.002);
+  const currentOpen = candles[candles.length-1].open;
+  const livePrice   = currentOpen*(1+(Math.random()-0.5)*0.002);
   candles[candles.length-1].close = +livePrice.toFixed(2);
   return { price:+livePrice.toFixed(2), betPrice:currentOpen, priceVsBet:livePrice-currentOpen, priceVsBetPct:((livePrice-currentOpen)/currentOpen)*100, candleOpenTime:candles[candles.length-1].time, candleCloseTime:candles[candles.length-1].closeTime, msUntilClose:msUntilNextBoundary(now), candles, source:"synthetic" };
 }
@@ -170,33 +123,9 @@ function calcATR(candles) {
   return {current:trs[trs.length-1]||0,avg:sl.reduce((a,b)=>a+b,0)/(sl.length||1)};
 }
 function calcStructure(candles) {
-  if (candles.length < 20) return { trend:"CHOP", swingHigh:0, swingLow:0, prevSwingHigh:0 };
-  const s = candles.slice(-20);
-  const closes = s.map(c => c.close);
-  // Quarter-based trend detection
-  const q1 = closes.slice(0,5).reduce((a,b)=>a+b,0)/5;
-  const q2 = closes.slice(5,10).reduce((a,b)=>a+b,0)/5;
-  const q3 = closes.slice(10,15).reduce((a,b)=>a+b,0)/5;
-  const q4 = closes.slice(15,20).reduce((a,b)=>a+b,0)/5;
-  // EMA slope for confirmation
-  const ema10 = emaArr(closes, 10);
-  const emaSlope = ema10[ema10.length-1] - ema10[ema10.length-5];
-  const emaSlopePct = ema10[ema10.length-5] > 0 ? emaSlope / ema10[ema10.length-5] * 100 : 0;
-  const rising  = q2>q1 && q3>q2 && q4>q3;
-  const falling = q2<q1 && q3<q2 && q4<q3;
-  let trend = "CHOP";
-  // Adaptive thresholds — 1m candles have much smaller moves than 15m
-  const slopeThresh = Math.abs(ema10[ema10.length-1]) > 1000 ? 0.02 : 0.005;
-  if      (rising  && emaSlopePct >  slopeThresh) trend = "UP";
-  else if (falling && emaSlopePct < -slopeThresh) trend = "DOWN";
-  else if (emaSlopePct >  slopeThresh * 3) trend = "UP";
-  else if (emaSlopePct < -slopeThresh * 3) trend = "DOWN";
-  return {
-    trend,
-    swingHigh: Math.max(...candles.slice(-10).map(c=>c.high)),
-    swingLow:  Math.min(...candles.slice(-10).map(c=>c.low)),
-    prevSwingHigh: Math.max(...candles.slice(-20,-10).map(c=>c.high))
-  };
+  if (candles.length<10) return {trend:"CHOP",swingHigh:0,swingLow:0,prevSwingHigh:0};
+  const s=candles.slice(-10),h=s.map(c=>c.high),l=s.map(c=>c.low),n=h.length-1;
+  return { trend:h[n]>h[n-2]&&h[n-2]>h[n-4]&&l[n]>l[n-2]&&l[n-2]>l[n-4]?"UP":h[n]<h[n-2]&&h[n-2]<h[n-4]&&l[n]<l[n-2]&&l[n-2]<l[n-4]?"DOWN":"CHOP", swingHigh:Math.max(...candles.slice(-5).map(c=>c.high)), swingLow:Math.min(...candles.slice(-5).map(c=>c.low)), prevSwingHigh:Math.max(...candles.slice(-10,-5).map(c=>c.high)) };
 }
 function calcMomentum(candles) {
   if (candles.length<7) return {sameDir:false,expanding:false,dir:"UP"};
@@ -217,85 +146,54 @@ function calcLocation(candles,st) {
 // ═══════════════════════════════════════════════════════════════
 // SCORING ENGINE
 // ═══════════════════════════════════════════════════════════════
-function runEngine(candles, betPrice, livePrice, streak, candles1m) {
-  // Multi-timeframe: use 15m candles for MACD/EMA/ATR, 1m candles for trend/momentum
+function runEngine(candles, betPrice, livePrice, streak) {
   const closes=candles.map(c=>c.close);
   const e50arr=emaArr(closes,50),e50=e50arr[e50arr.length-1];
-  const m=calcMACD(closes),at=calcATR(candles);
-  // Use 1m candles for momentum/structure if available — captures recent 15 mins
-  const candlesForMom = (candles1m && candles1m.length >= 5) ? candles1m : candles;
-  const mom=calcMomentum(candlesForMom),st=calcStructure(candlesForMom),loc=calcLocation(candles,st);
+  const m=calcMACD(closes),at=calcATR(candles),mom=calcMomentum(candles),st=calcStructure(candles),loc=calcLocation(candles,st);
   const priceVsBet=livePrice-betPrice,priceVsBetPct=(priceVsBet/betPrice)*100,candleDir=livePrice>=betPrice?"UP":"DOWN";
   let score=0; const reasoning=[],warnings=[],bd={};
+
   let ts=0;
   livePrice>e50?(ts++,reasoning.push("Price above EMA50")):reasoning.push("Price below EMA50");
   m.macd>0?(ts++,reasoning.push("MACD above zero line")):reasoning.push("MACD below zero");
   bd.trend=ts;score+=ts;
+
   let ms=0;
   mom.sameDir?(ms++,reasoning.push("Last 2 candles same direction")):warnings.push("Conflicting candle directions");
   mom.expanding&&(ms++,reasoning.push("Candle body expanding"));
   bd.momentum=ms;score+=ms;
+
   let vs=0;
   at.current>at.avg?(vs++,reasoning.push("ATR above 20-period average")):warnings.push("ATR below average — low volatility");
   Math.abs(candles[candles.length-1].close-candles[candles.length-1].open)>candles.slice(-6,-1).reduce((s,c)=>s+Math.abs(c.close-c.open),0)/5&&(vs++,reasoning.push("Candle body above average"));
   bd.volatility=vs;score+=vs;
+
   let macdS=0;
   ((m.macd>m.signal&&mom.dir==="UP")||(m.macd<m.signal&&mom.dir==="DOWN"))&&(macdS++,reasoning.push("MACD aligned with direction"));
   Math.abs(m.hist)>Math.abs(m.histPrev)&&(macdS++,reasoning.push("MACD histogram expanding"));
   bd.macd=macdS;score+=macdS;
+
   bd.location=loc.penalty;score+=loc.penalty;
   loc.reason&&warnings.push(loc.reason);
   if(at.current<at.avg*0.5){warnings.push("Volatility too low — suppressed");score=Math.min(score,3);}
-  // Include trend in vote count — trend direction is a strong signal
-  const bv =[m.macd>0,mom.dir==="UP",st.trend==="UP",livePrice>e50].filter(Boolean).length;
-  const bvD=[m.macd<0,mom.dir==="DOWN",st.trend==="DOWN",livePrice<e50].filter(Boolean).length;
-  let rawDir=bv>=3?"UP":bvD>=3?"DOWN":bv>=2&&bvD===0?"UP":bvD>=2&&bv===0?"DOWN":"MIXED";
+
+  const bv=[livePrice>e50,mom.dir==="UP",m.macd>m.signal].filter(Boolean).length;
+  const bvD=[livePrice<e50,mom.dir==="DOWN",m.macd<m.signal].filter(Boolean).length;
+  let rawDir=bv>=2&&bvD===0?"UP":bvD>=2&&bv===0?"DOWN":"MIXED";
   let revBlock=false;
   if(rawDir==="UP"&&st.trend==="DOWN"&&livePrice<=st.prevSwingHigh){revBlock=true;warnings.push("Reversal filter: lower high not broken");}
-  // ── OPTIMIZED RULES v9 (all backtest data analysis) ──
-  // KEY FINDING: Vote unanimity is the best predictor, not score thresholds
-  // - All 1m votes DOWN (bvD votes all unanimous) + strong count = HIGH DOWN
-  // - All 1m votes UP + strong count = HIGH UP
-  // - Score is used as a secondary filter only
-  const macdBearish = m.macd < m.signal;
-  const macdBullish = m.macd > m.signal;
-  const priceAboveEMA = livePrice > e50;
+
   let signal="NO BET",confidence="LOW";
+  if(score>=6&&rawDir!=="MIXED"&&!revBlock){signal=rawDir;confidence="HIGH";}
+  else if(score>=4&&rawDir!=="MIXED"&&!revBlock){signal=rawDir;confidence="MEDIUM";}
 
-  // The bv/bvD counts from the 4-indicator vote system mirror the minute-vote pattern
-  // bvD=4 (all 4 bearish indicators agree) = unanimous bearish
-  // bv=4  (all 4 bullish indicators agree) = unanimous bullish
-
-  // Rule 1: All 4 bearish indicators + score≥5 = HIGH DOWN (mirrors 89% unanimous rule)
-  if(bvD===4&&score>=5&&!revBlock){
-    signal="DOWN";confidence="HIGH";
-  }
-  // Rule 2: All 4 bearish + score≥3 = MEDIUM DOWN (mirrors 81% rule)
-  else if(bvD===4&&score>=3&&!revBlock){
-    signal="DOWN";confidence="MEDIUM";
-  }
-  // Rule 3: All 4 bullish + score≥6 = HIGH UP (mirrors 67% rule)
-  else if(bv===4&&score>=6&&!revBlock){
-    signal="UP";confidence="HIGH";
-  }
-  // Rule 4: All 4 bullish + score≥4 = MEDIUM UP
-  else if(bv===4&&score>=4&&!revBlock){
-    signal="UP";confidence="MEDIUM";
-  }
-  // Rule 5: Strong majority (3/4) bearish + score≥6 = MEDIUM DOWN
-  else if(bvD>=3&&bv===0&&score>=6&&!revBlock){
-    signal="DOWN";confidence="MEDIUM";
-  }
-  // Rule 6: Strong majority (3/4) bullish + score≥7 = MEDIUM UP
-  else if(bv>=3&&bvD===0&&score>=7&&!revBlock){
-    signal="UP";confidence="MEDIUM";
-  }
   let betSize=0;
   if(signal!=="NO BET"&&streak.losses<4){
     betSize=streak.losses===3?2:streak.losses===2?3:streak.wins>=3?6:streak.wins===2?5:4;
   }
   streak.losses>=4&&warnings.push("HARD STOP — 4 consecutive losses");
   Math.abs(priceVsBetPct)>0.1&&reasoning.push(`Price ${priceVsBetPct>0?"+":""}${priceVsBetPct.toFixed(2)}% vs bet price`);
+
   return {
     timestamp:new Date().toISOString(),signal,confidence,
     score:Math.max(-2,Math.min(8,score)),trend:st.trend,
@@ -305,177 +203,66 @@ function runEngine(candles, betPrice, livePrice, streak, candles1m) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// BACKTEST ENGINE v2 — majority vote across full window
-// ═══════════════════════════════════════════════════════════════
-async function runBacktest(onProgress) {
-  onProgress("Fetching 1-minute candles for detailed backtest...");
-  let candles1m = [];
-  try {
-    // Fetch max 1-min candles — CryptoCompare allows up to 2000
-    const r = await fetch(`${API_BASE}/candles?interval=1m&limit=2000`);
-    if (!r.ok) throw new Error("Backend error");
-    candles1m = await r.json();
-  } catch {
-    onProgress("Backend failed — using synthetic candles");
-    const s = generateSynthetic(77000, 200);
-    candles1m = [];
-    for (const c of s.candles) {
-      for (let i = 0; i < 15; i++) {
-        const t = c.time + i * 60000;
-        const p = c.open + (c.close - c.open) * (i / 14);
-        candles1m.push({ time: t, open: p, high: p + 10, low: p - 10, close: p, volume: c.volume / 15, closeTime: t + 60000 });
-      }
-    }
-  }
-
-  if (candles1m.length < 30) throw new Error("Not enough candle data");
-
-  // Group 1-minute candles into 15-minute windows
-  const MS15 = 15 * 60 * 1000;
-  const windowMap = {};
-  for (const c of candles1m) {
-    const windowKey = Math.floor(c.time / MS15) * MS15;
-    if (!windowMap[windowKey]) windowMap[windowKey] = [];
-    windowMap[windowKey].push(c);
-  }
-
-  const windowKeys = Object.keys(windowMap).map(Number).sort();
-  onProgress(`Found ${windowKeys.length} 15-minute windows. Running majority vote engine...`);
-
-  const results = [];
-  const WARMUP_WINDOWS = 30; // need 26+ prior 15m candles for MACD
-
-  for (let wi = WARMUP_WINDOWS; wi < windowKeys.length - 1; wi++) {
-    const windowStart = windowKeys[wi];
-    const windowCandles = windowMap[windowStart];
-    const nextWindowStart = windowKeys[wi + 1];
-    const nextCandles = windowMap[nextWindowStart];
-    if (!windowCandles || windowCandles.length < 3) continue;
-    if (!nextCandles || nextCandles.length < 1) continue;
-
-    // Multi-timeframe backtest:
-    // - Build prior 15m candles from grouped windows for MACD/EMA/ATR
-    // - Use prior 1m candles for trend/momentum
-    const prior15mCandles = [];
-    for (let pi = Math.max(0, wi - 100); pi < wi; pi++) {
-      const pKey = windowKeys[pi];
-      const pCandles = windowMap[pKey];
-      if (!pCandles || pCandles.length === 0) continue;
-      prior15mCandles.push({
-        time: pKey,
-        open: pCandles[0].open,
-        high: Math.max(...pCandles.map(c=>c.high)),
-        low:  Math.min(...pCandles.map(c=>c.low)),
-        close: pCandles[pCandles.length-1].close,
-        volume: pCandles.reduce((s,c)=>s+c.volume,0),
-        closeTime: pKey + MS15,
-      });
-    }
-    if (prior15mCandles.length < 26) continue;
-
-    // Run signal at every 1-minute mark within this window
-    const upVotes = [], downVotes = [], noVotes = [];
-    const minuteSignals = [];
-
-    for (let mi = 0; mi < windowCandles.length; mi++) {
-      const currentMinCandles = windowCandles.slice(0, mi + 1);
-      // Update last 15m candle close to current 1m price
-      const candlesFor15m = [...prior15mCandles];
-      if (candlesFor15m.length > 0) {
-        candlesFor15m[candlesFor15m.length-1] = {
-          ...candlesFor15m[candlesFor15m.length-1],
-          close: currentMinCandles[currentMinCandles.length-1].close
-        };
-      }
-      const betPrice  = windowCandles[0].open;
-      const livePrice = currentMinCandles[currentMinCandles.length-1].close;
-      // Pass 15m candles for MACD/EMA/ATR, 1m candles for trend/momentum
-      const sig = runEngine(candlesFor15m, betPrice, livePrice, { wins: 0, losses: 0 }, currentMinCandles);
-      minuteSignals.push({ minute: mi, signal: sig.signal, score: sig.score, confidence: sig.confidence, trend: sig.trend || "CHOP" });
-      if (sig.signal === "UP") upVotes.push(sig);
-      else if (sig.signal === "DOWN") downVotes.push(sig);
-      else noVotes.push(sig);
-    }
-
-    // ── VOTE-BASED SIGNAL RULES (optimized from all backtest data) ──
-    // Key finding: vote UNANIMITY is far more predictive than score
-    // - votesUp=0 AND votesDown>=6 → 89% DOWN accuracy
-    // - votesDown=0 AND votesUp>=8 → 67% UP accuracy
-    const totalVotes = upVotes.length + downVotes.length + noVotes.length;
-    const avgScoreAll = minuteSignals.length > 0 ? Math.round(minuteSignals.reduce((s, v) => s + v.score, 0) / minuteSignals.length) : 0;
-    let majoritySignal = "NO BET";
-    let majorityConfidence = "LOW";
-    let avgScore = avgScoreAll;
-    let voteBreakdown = { up: upVotes.length, down: downVotes.length, noBet: noVotes.length };
-
-    // Rule 1: Unanimous DOWN + strong vote count = HIGH DOWN (89% accurate)
-    if (upVotes.length === 0 && downVotes.length >= 6) {
-      majoritySignal = "DOWN";
-      majorityConfidence = "HIGH";
-      avgScore = Math.round(downVotes.reduce((s, v) => s + v.score, 0) / downVotes.length);
-    }
-    // Rule 2: Unanimous DOWN + moderate vote count = MEDIUM DOWN (81% accurate)
-    else if (upVotes.length === 0 && downVotes.length >= 4) {
-      majoritySignal = "DOWN";
-      majorityConfidence = "MEDIUM";
-      avgScore = Math.round(downVotes.reduce((s, v) => s + v.score, 0) / downVotes.length);
-    }
-    // Rule 3: Unanimous UP + strong vote count = HIGH UP (67% accurate)
-    else if (downVotes.length === 0 && upVotes.length >= 8) {
-      majoritySignal = "UP";
-      majorityConfidence = "HIGH";
-      avgScore = Math.round(upVotes.reduce((s, v) => s + v.score, 0) / upVotes.length);
-    }
-    // Rule 4: Unanimous UP + moderate = MEDIUM UP
-    else if (downVotes.length === 0 && upVotes.length >= 6) {
-      majoritySignal = "UP";
-      majorityConfidence = "MEDIUM";
-      avgScore = Math.round(upVotes.reduce((s, v) => s + v.score, 0) / upVotes.length);
-    }
-
-    // Signal uses data from window W to predict direction of window W
-    // Bet price = window W open, result = window W close vs open
-    const windowOpenPrice = windowCandles[0].open;
-    const windowClosePrice = nextCandles[0].open; // next window open = current window close
-    const actualDir = windowClosePrice > windowOpenPrice ? "UP" : "DOWN";
-    const signalCorrect = majoritySignal !== "NO BET" ? majoritySignal === actualDir : null;
-
-    results.push({
-      time: windowStart,
-      signal: majoritySignal,
-      confidence: majorityConfidence,
-      score: avgScore,
-      trend: minuteSignals[minuteSignals.length - 1]?.trend || "CHOP",
-      openPrice: windowOpenPrice,
-      closePrice: windowClosePrice,
-      nextClose: windowClosePrice,
-      actualDir,
-      signalCorrect,
-      betPlaced: majoritySignal !== "NO BET",
-      voteBreakdown,
-      totalMinutes: windowCandles.length,
-    });
-
-    if (wi % 10 === 0) onProgress(`Processed ${wi}/${windowKeys.length} windows...`);
-  }
-
-  return results;
-}
-
-// ═══════════════════════════════════════════════════════════════
 // TRADE LOG ENTRY BUILDER
+// Captures a full snapshot of the signal + all metrics
+// outcome: "WIN" | "LOSS" | "NO_BET" | "PENDING"
 // ═══════════════════════════════════════════════════════════════
 function buildLogEntry(sig, data, outcome = "PENDING") {
   const m = sig._meta;
   return {
-    id: data.candleOpenTime, windowOpen: data.candleOpenTime, windowClose: data.candleCloseTime,
-    date: fmtDate(data.candleOpenTime), time: fmtTime(data.candleOpenTime),
-    signal: sig.signal, confidence: sig.confidence, score: sig.score, trend: sig.trend, bet_size_pct: sig.bet_size_percent,
-    betPrice: m.betPrice, livePriceAtSignal: m.livePrice, closePriceActual: null, priceVsBetAtSignal: m.priceVsBetPct,
-    indicators: { ema50:+m.e50.toFixed(2), macd:+m.macd.macd.toFixed(2), macdSignal:+m.macd.signal.toFixed(2), macdHist:+m.macd.hist.toFixed(2), atrCurrent:+m.atr.current.toFixed(2), atrAvg:+m.atr.avg.toFixed(2), atrRatio:+(m.atr.current/m.atr.avg).toFixed(3), structure:m.st.trend, swingHigh:+m.st.swingHigh.toFixed(2), swingLow:+m.st.swingLow.toFixed(2), momentumDir:m.mom.dir, momentumSameDir:m.mom.sameDir, momentumExpanding:m.mom.expanding, candleDir:m.candleDir, priceAboveEMA:m.livePrice>m.e50 },
-    scoreBreakdown: { ...m.bd }, reasoning: sig.reasoning, warnings: sig.warnings,
-    outcome, betPlaced: outcome !== "NO_BET" && outcome !== "PENDING", resolvedAt: outcome !== "PENDING" ? Date.now() : null,
-    actualDirection: null, signalCorrect: null,
+    id:            data.candleOpenTime,          // unique per window
+    windowOpen:    data.candleOpenTime,
+    windowClose:   data.candleCloseTime,
+    date:          fmtDate(data.candleOpenTime),
+    time:          fmtTime(data.candleOpenTime),
+
+    // Signal
+    signal:        sig.signal,
+    confidence:    sig.confidence,
+    score:         sig.score,
+    trend:         sig.trend,
+    bet_size_pct:  sig.bet_size_percent,
+
+    // Prices
+    betPrice:      m.betPrice,
+    livePriceAtSignal: m.livePrice,
+    closePriceActual:  null,   // filled in when window closes
+    priceVsBetAtSignal: m.priceVsBetPct,
+
+    // Full indicator snapshot
+    indicators: {
+      ema50:         +m.e50.toFixed(2),
+      macd:          +m.macd.macd.toFixed(2),
+      macdSignal:    +m.macd.signal.toFixed(2),
+      macdHist:      +m.macd.hist.toFixed(2),
+      atrCurrent:    +m.atr.current.toFixed(2),
+      atrAvg:        +m.atr.avg.toFixed(2),
+      atrRatio:      +(m.atr.current/m.atr.avg).toFixed(3),
+      structure:     m.st.trend,
+      swingHigh:     +m.st.swingHigh.toFixed(2),
+      swingLow:      +m.st.swingLow.toFixed(2),
+      momentumDir:   m.mom.dir,
+      momentumSameDir: m.mom.sameDir,
+      momentumExpanding: m.mom.expanding,
+      candleDir:     m.candleDir,
+      priceAboveEMA: m.livePrice > m.e50,
+    },
+
+    // Score breakdown
+    scoreBreakdown: { ...m.bd },
+
+    // Reasoning + warnings snapshot
+    reasoning:   sig.reasoning,
+    warnings:    sig.warnings,
+
+    // Outcome — filled by user or auto-set
+    outcome,          // "WIN" | "LOSS" | "NO_BET" | "PENDING"
+    betPlaced:  outcome !== "NO_BET" && outcome !== "PENDING",
+    resolvedAt: outcome !== "PENDING" ? Date.now() : null,
+
+    // Actual direction outcome (filled when window closes)
+    actualDirection: null,   // "UP" | "DOWN" — what price actually did
+    signalCorrect:   null,   // true/false — was signal direction right?
   };
 }
 
@@ -497,6 +284,9 @@ function ScoreBar({label,value,max=2,color}) {
       <div style={{height:4,background:"#0f1525",borderRadius:2}}>
         <div style={{height:"100%",width:`${pct}%`,background:color,borderRadius:2,transition:"width .9s ease"}} />
       </div>
+      <button className="refresh-fab" onClick={()=>refresh(false)} disabled={loading}>
+        {loading ? "⏳ LOADING..." : "↺  REFRESH"}
+      </button>
     </div>
   );
 }
@@ -513,6 +303,9 @@ function WindowProgress({msUntilClose}) {
       <div style={{height:3,background:"#0f1525",borderRadius:2}}>
         <div style={{height:"100%",width:`${pct}%`,background:color,borderRadius:2,transition:"width 1s linear",boxShadow:msUntilClose<60000?`0 0 8px ${RED}99`:"none"}} />
       </div>
+      <button className="refresh-fab" onClick={()=>refresh(false)} disabled={loading}>
+        {loading ? "⏳ LOADING..." : "↺  REFRESH"}
+      </button>
     </div>
   );
 }
@@ -548,20 +341,28 @@ function StreakDots({history}) {
   );
 }
 
+// Trade log table row
 function LogRow({entry, onSetOutcome}) {
   const sColor=entry.signal==="UP"?GREEN:entry.signal==="DOWN"?RED:FG3;
   const isPending=entry.outcome==="PENDING";
   return (
     <div style={{display:"grid",gridTemplateColumns:"80px 60px 50px 50px 90px 90px 90px 1fr",gap:6,padding:"10px 12px",borderBottom:`1px solid ${BDR}`,alignItems:"center",fontSize:11}}>
-      <div><div style={{color:FG,fontWeight:700}}>{entry.time}</div><div style={{color:FG4,fontSize:9}}>{entry.date}</div></div>
+      <div>
+        <div style={{color:FG,fontWeight:700}}>{entry.time}</div>
+        <div style={{color:FG4,fontSize:9}}>{entry.date}</div>
+      </div>
       <div style={{fontFamily:"'Bebas Neue'",fontSize:18,color:sColor}}>{entry.signal}</div>
       <div style={{color:entry.score>=6?GREEN:entry.score<=3?RED:AMBER,fontWeight:700}}>{entry.score}/8</div>
       <div style={{color:FG3}}>{entry.confidence.slice(0,3)}</div>
-      <div><div style={{color:AMBER,fontSize:10}}>${entry.betPrice?.toLocaleString("en-US",{minimumFractionDigits:0,maximumFractionDigits:0})}</div><div style={{fontSize:9,color:FG4}}>bet price</div></div>
+      <div>
+        <div style={{color:AMBER,fontSize:10}}>${entry.betPrice?.toLocaleString("en-US",{minimumFractionDigits:0,maximumFractionDigits:0})}</div>
+        <div style={{fontSize:9,color:FG4}}>bet price</div>
+      </div>
       <div>
         {entry.closePriceActual
           ? <><div style={{color:FG,fontSize:10}}>${entry.closePriceActual?.toLocaleString("en-US",{minimumFractionDigits:0,maximumFractionDigits:0})}</div><div style={{fontSize:9,color:entry.actualDirection==="UP"?GREEN:RED}}>{entry.actualDirection==="UP"?"▲":"▼"} {entry.actualDirection}</div></>
-          : <div style={{color:FG4,fontSize:9}}>awaiting close</div>}
+          : <div style={{color:FG4,fontSize:9}}>awaiting close</div>
+        }
       </div>
       <div><OutcomeBadge outcome={entry.outcome} /></div>
       {isPending && (
@@ -577,195 +378,6 @@ function LogRow({entry, onSetOutcome}) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// BACKTEST TAB COMPONENT
-// ═══════════════════════════════════════════════════════════════
-function BacktestTab() {
-  const [status, setStatus]   = useState("idle"); // idle | running | done | error
-  const [progress, setProgress] = useState("");
-  const [results, setResults] = useState(null);
-  const [filter, setFilter]   = useState("ALL"); // ALL | HIGH | MEDIUM
-
-  const run = async () => {
-    setStatus("running"); setResults(null);
-    try {
-      const r = await runBacktest(msg => setProgress(msg));
-      setResults(r);
-      setStatus("done");
-    } catch(e) {
-      setProgress(e.message);
-      setStatus("error");
-    }
-  };
-
-  const filtered = results ? results.filter(r => {
-    if (filter === "HIGH")   return r.confidence === "HIGH";
-    if (filter === "MEDIUM") return r.confidence === "MEDIUM" || r.confidence === "HIGH";
-    return true;
-  }) : [];
-
-  const signaled   = filtered.filter(r => r.betPlaced);
-  const correct    = signaled.filter(r => r.signalCorrect === true);
-  const noBet      = filtered.filter(r => !r.betPlaced);
-  const winRate    = signaled.length > 0 ? Math.round(correct.length / signaled.length * 100) : null;
-  const upSignals  = signaled.filter(r => r.signal === "UP");
-  const downSignals= signaled.filter(r => r.signal === "DOWN");
-  const upWins     = upSignals.filter(r => r.signalCorrect).length;
-  const downWins   = downSignals.filter(r => r.signalCorrect).length;
-
-  // P&L sim: $100 per trade
-  const BET = 100;
-  let pnl = 0;
-  signaled.forEach(r => { pnl += r.signalCorrect ? BET * 0.9 : -BET; }); // assume ~90% payout
-
-  // Score breakdown
-  const byScore = [4,5,6,7,8].map(s => {
-    const trades = signaled.filter(r => r.score === s);
-    const wins   = trades.filter(r => r.signalCorrect).length;
-    return { score: s, trades: trades.length, wins, rate: trades.length > 0 ? Math.round(wins/trades.length*100) : null };
-  });
-
-  return (
-    <div className="fi">
-      {/* HEADER */}
-      <div className="card" style={{marginBottom:12}}>
-        <div style={{fontSize:9,color:FG4,letterSpacing:".15em",marginBottom:8}}>BACKTEST — LAST 2 WEEKS OF REAL DATA</div>
-        <div style={{fontSize:12,color:FG2,lineHeight:1.7,marginBottom:14}}>
-          Pulls real 15-minute BTC candles from your backend, runs the signal engine on each window, and checks if the prediction was correct against the next candle's close.
-        </div>
-        <button
-          className="btn"
-          style={{color:GREEN,borderColor:`${GREEN}55`,padding:"12px 24px",fontSize:13,width:"100%"}}
-          onClick={run}
-          disabled={status==="running"}
-        >
-          {status==="running" ? "⏳ RUNNING..." : status==="done" ? "↺ RUN AGAIN" : "▶ RUN BACKTEST"}
-        </button>
-        {status==="running"&&<div style={{marginTop:10,fontSize:11,color:AMBER,textAlign:"center"}}>{progress}</div>}
-        {status==="error"&&<div style={{marginTop:10,fontSize:11,color:RED,textAlign:"center"}}>{progress}</div>}
-      </div>
-
-      {results && (
-        <>
-          {/* FILTER */}
-          <div style={{display:"flex",gap:8,marginBottom:12}}>
-            {["ALL","MEDIUM","HIGH"].map(f=>(
-              <button key={f} className="btn" style={{flex:1,color:filter===f?GREEN:FG3,borderColor:filter===f?`${GREEN}55`:BDR}} onClick={()=>setFilter(f)}>
-                {f}
-              </button>
-            ))}
-          </div>
-
-          {/* SUMMARY STATS */}
-          <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:10,marginBottom:12}}>
-            {[
-              {label:"SIGNAL WIN RATE", value:winRate!==null?`${winRate}%`:"—", color:winRate>=60?GREEN:winRate>=50?AMBER:RED, sub:`${correct.length}/${signaled.length} correct`},
-              {label:"P&L (SIM $100/trade)", value:`${pnl>=0?"+":""}$${pnl.toFixed(0)}`, color:pnl>=0?GREEN:RED, sub:`${signaled.length} trades placed`},
-              {label:"NO BET RATE", value:`${Math.round(noBet.length/filtered.length*100)}%`, color:AMBER, sub:`${noBet.length} windows skipped`},
-              {label:"TOTAL WINDOWS", value:filtered.length, color:FG2, sub:`~${Math.round(filtered.length/96)} days of data`},
-            ].map(({label,value,color,sub})=>(
-              <div key={label} className="card" style={{textAlign:"center"}}>
-                <div style={{fontSize:9,color:FG4,marginBottom:6,letterSpacing:".1em"}}>{label}</div>
-                <div style={{fontFamily:"'Bebas Neue'",fontSize:28,color,lineHeight:1}}>{value}</div>
-                <div style={{fontSize:10,color:FG3,marginTop:4}}>{sub}</div>
-              </div>
-            ))}
-          </div>
-
-          {/* UP vs DOWN */}
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
-            <div className="card" style={{textAlign:"center",borderColor:`${GREEN}33`}}>
-              <div style={{fontSize:9,color:FG4,letterSpacing:".1em",marginBottom:6}}>UP SIGNALS</div>
-              <div style={{fontFamily:"'Bebas Neue'",fontSize:32,color:GREEN}}>{upSignals.length>0?`${Math.round(upWins/upSignals.length*100)}%`:"—"}</div>
-              <div style={{fontSize:10,color:FG3,marginTop:4}}>{upWins}/{upSignals.length} correct</div>
-            </div>
-            <div className="card" style={{textAlign:"center",borderColor:`${RED}33`}}>
-              <div style={{fontSize:9,color:FG4,letterSpacing:".1em",marginBottom:6}}>DOWN SIGNALS</div>
-              <div style={{fontFamily:"'Bebas Neue'",fontSize:32,color:RED}}>{downSignals.length>0?`${Math.round(downWins/downSignals.length*100)}%`:"—"}</div>
-              <div style={{fontSize:10,color:FG3,marginTop:4}}>{downWins}/{downSignals.length} correct</div>
-            </div>
-          </div>
-
-          {/* WIN RATE BY SCORE */}
-          <div className="card" style={{marginBottom:12}}>
-            <div style={{fontSize:9,color:FG4,letterSpacing:".15em",marginBottom:14}}>WIN RATE BY SCORE</div>
-            {byScore.map(({score,trades,wins,rate})=>(
-              <div key={score} style={{marginBottom:10}}>
-                <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
-                  <span style={{fontSize:12,color:FG3}}>SCORE {score}/8</span>
-                  <span style={{fontSize:12,color:rate>=60?GREEN:rate>=50?AMBER:RED,fontWeight:700}}>
-                    {rate!==null?`${rate}%`:"—"} <span style={{color:FG4,fontWeight:400}}>({trades} trades)</span>
-                  </span>
-                </div>
-                <div style={{height:4,background:"#0f1525",borderRadius:2}}>
-                  <div style={{height:"100%",width:`${rate||0}%`,background:rate>=60?GREEN:rate>=50?AMBER:RED,borderRadius:2}} />
-                </div>
-              </div>
-            ))}
-          </div>
-
-          {/* EXPORT BUTTON */}
-          <div className="card" style={{marginBottom:12}}>
-            <button
-              className="btn"
-              style={{color:GREEN,borderColor:`${GREEN}55`,padding:"12px 24px",fontSize:13,width:"100%"}}
-              onClick={()=>{
-                const headers = ["time","date","signal","confidence","score","trend","openPrice","closePrice","nextClose","actualDir","signalCorrect","betPlaced","votesUp","votesDown","votesNoBet","totalMinutes"];
-                const rows = filtered.map(r => [
-                  fmtTime(r.time), fmtDate(r.time), r.signal, r.confidence, r.score, r.trend,
-                  r.openPrice, r.closePrice, r.nextClose, r.actualDir,
-                  r.signalCorrect===null?"N/A":r.signalCorrect?"TRUE":"FALSE",
-                  r.betPlaced,
-                  r.voteBreakdown?.up??0, r.voteBreakdown?.down??0, r.voteBreakdown?.noBet??0,
-                  r.totalMinutes??1
-                ].join(","));
-                const csv = [headers.join(","), ...rows].join("\n");
-                const blob = new Blob([csv],{type:"text/csv"});
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement("a");
-                a.href=url; a.download=`btc_backtest_${Date.now()}.csv`; a.click();
-                URL.revokeObjectURL(url);
-              }}
-            >
-              ↓ EXPORT BACKTEST CSV ({filtered.length} rows)
-            </button>
-          </div>
-
-          {/* RECENT SIGNALS TABLE */}
-          <div className="card">
-            <div style={{fontSize:9,color:FG4,letterSpacing:".15em",marginBottom:12}}>LAST 20 SIGNALS</div>
-            <div style={{overflowX:"auto"}}>
-              {signaled.slice(-20).reverse().map((r,i)=>(
-                <div key={i} style={{display:"grid",gridTemplateColumns:"70px 55px 45px 45px 80px 1fr",gap:6,padding:"8px 0",borderBottom:`1px solid ${BDR}`,fontSize:11,alignItems:"center"}}>
-                  <div style={{color:FG3,fontSize:10}}>{fmtTime(r.time)}</div>
-                  <div style={{fontFamily:"'Bebas Neue'",fontSize:16,color:r.signal==="UP"?GREEN:RED}}>{r.signal}</div>
-                  <div style={{color:r.score>=6?GREEN:r.score<=3?RED:AMBER}}>{r.score}/8</div>
-                  <div style={{fontSize:10,color:FG3}}>{r.confidence.slice(0,3)}</div>
-                  <div style={{fontSize:9,color:FG4}}>
-                    {r.voteBreakdown ? (
-                      <span>
-                        <span style={{color:GREEN}}>▲{r.voteBreakdown.up}</span>
-                        {" / "}
-                        <span style={{color:RED}}>▼{r.voteBreakdown.down}</span>
-                        {" / "}
-                        <span style={{color:FG4}}>–{r.voteBreakdown.noBet}</span>
-                      </span>
-                    ) : "—"}
-                  </div>
-                  <div style={{fontSize:12,color:r.signalCorrect?GREEN:RED,fontWeight:700}}>
-                    {r.signalCorrect ? "✓ CORRECT" : "✗ WRONG"}
-                    <span style={{color:FG4,fontSize:10,fontWeight:400,marginLeft:8}}>{r.actualDir}</span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
-// ═══════════════════════════════════════════════════════════════
 // MAIN APP
 // ═══════════════════════════════════════════════════════════════
 function BTCDecisionEngine() {
@@ -774,135 +386,184 @@ function BTCDecisionEngine() {
   const [loadMsg,setLoadMsg]       = useState("");
   const [error,setError]           = useState(null);
   const [streak,setStreak]         = useState({wins:0,losses:0});
-  const [tradeLog,setTradeLog]     = useState([]);
+  const [tradeLog,setTradeLog]     = useState([]);      // persisted
   const [bankroll,setBankroll]     = useState(1000);
   const [lastRefresh,setLastRefresh] = useState(null);
   const [source,setSource]         = useState("");
   const [msLeft,setMsLeft]         = useState(msUntilNextBoundary());
-  const [tab,setTab]               = useState("signal");
+  const [tab,setTab]               = useState("signal"); // "signal" | "log" | "export"
   const [storageReady,setStorageReady] = useState(false);
-  const [tgStatus,setTgStatus]     = useState("");
   const lastBoundaryRef            = useRef(current15mOpenTime());
-  const pendingWindowRef           = useRef(null);
+  const pendingWindowRef           = useRef(null); // tracks window that needs close price
   const timerRef                   = useRef(null);
 
+  // Load persisted data on mount
   useEffect(() => {
     (async () => {
       const [log, sk] = await Promise.all([loadLog(), loadStreak()]);
-      setTradeLog(log); setStreak(sk); setStorageReady(true);
+      setTradeLog(log);
+      setStreak(sk);
+      setStorageReady(true);
     })();
   }, []);
 
+  // ── AUTO-RESOLVE: when a window closes, fetch the close price and patch the log ──
   const resolveClosedWindow = useCallback(async (windowCloseTime, windowOpenTime) => {
+    // Fetch recent candles to find the close price of the completed window
     try {
       let closePrice = null;
       try {
         const r = await fetch(`${API_BASE}/candles?interval=15m&limit=5`);
-        if (r.ok) { const candles = await r.json(); const match = candles.find(c => Math.abs(c.time - windowOpenTime) < 60000); if (match) closePrice = match.close; }
+        if (r.ok) {
+          const candles = await r.json();
+          // Find the candle that matches this window
+          const match = candles.find(c => Math.abs(c.time - windowOpenTime) < 60000);
+          if (match) closePrice = match.close;
+        }
       } catch {}
+
       if (closePrice) {
         setTradeLog(prev => {
           const updated = prev.map(entry => {
             if (entry.id !== windowOpenTime) return entry;
             const actualDirection = closePrice > entry.betPrice ? "UP" : "DOWN";
-            const signalCorrect = entry.signal !== "NO BET" ? entry.signal === actualDirection : null;
-            const outcome = entry.outcome === "PENDING" ? "NO_BET" : entry.outcome;
+            const signalCorrect   = entry.signal !== "NO BET"
+              ? entry.signal === actualDirection
+              : null;
+            const outcome = entry.outcome === "PENDING"
+              ? "NO_BET"  // auto-mark as NO BET if user never chose
+              : entry.outcome;
             return { ...entry, closePriceActual:closePrice, actualDirection, signalCorrect, outcome, resolvedAt: entry.resolvedAt || Date.now() };
           });
-          saveLog(updated); return updated;
+          saveLog(updated);
+          return updated;
         });
       }
     } catch (e) { console.error("resolve error", e); }
   }, []);
 
   const refresh = useCallback(async (isNewWindow = false) => {
-    setLoading(true); setError(null); setLoadMsg("Fetching live data...");
+    setLoading(true); setError(null); setLoadMsg("Fetching live Binance data...");
     try {
       let data;
       try { data = await fetchBTCData(); }
-      catch(e) { setLoadMsg("Backend unreachable — using synthetic data"); data = generateSynthetic(77000,100); data.candles1m = []; }
+      catch(e) { setLoadMsg("Backend unreachable — using synthetic data"); data = generateSynthetic(103000,100); }
+
       setLoadMsg("Running scoring engine...");
       setSource(data.source);
       const sk = streak;
-      // Multi-timeframe: 15m for MACD/EMA/ATR, 1m for trend/momentum
-      const out = runEngine(data.candles, data.betPrice, data.price, sk, data.candles1m);
+      const out = runEngine(data.candles, data.betPrice, data.price, sk);
       out._meta.candleOpenTime  = data.candleOpenTime;
       out._meta.candleCloseTime = data.candleCloseTime;
       out._meta.msUntilClose    = data.msUntilClose;
-
       setResult(out);
       setLastRefresh(new Date());
       setMsLeft(data.msUntilClose || msUntilNextBoundary());
 
-      // Telegram notification on new window if score qualifies
-      if (isNewWindow && out.signal !== "NO BET" && out.score >= TG_MIN_SCORE) {
-        sendTelegramAlert(out, data.price, data.betPrice).then(() => {
-          if (TG_BOT_TOKEN && TG_CHAT_ID) { setTgStatus("✓ Alert sent"); setTimeout(()=>setTgStatus(""),3000); }
-        });
-      }
-
+      // On a new window: auto-log the signal as PENDING
       if (isNewWindow) {
         const entry = buildLogEntry(out, data, "PENDING");
         setTradeLog(prev => {
+          // Don't duplicate
           if (prev.find(e => e.id === entry.id)) return prev;
-          const updated = [entry, ...prev].slice(0, 200);
-          saveLog(updated); return updated;
+          const updated = [entry, ...prev].slice(0, 200); // keep last 200
+          saveLog(updated);
+          return updated;
         });
       }
     } catch(e) { setError(e.message); }
     finally { setLoading(false); setLoadMsg(""); }
   }, [streak]);
 
+  // Tick every second
   useEffect(() => {
     const tick = async () => {
-      const now = Date.now(); const ms = msUntilNextBoundary(now); setMsLeft(ms);
+      const now = Date.now();
+      const ms  = msUntilNextBoundary(now);
+      setMsLeft(ms);
+
       const boundary = current15mOpenTime(now);
       if (boundary > lastBoundaryRef.current) {
-        const prevBoundary = lastBoundaryRef.current; lastBoundaryRef.current = boundary;
-        resolveClosedWindow(prevBoundary + MS15, prevBoundary); refresh(true);
+        const prevBoundary = lastBoundaryRef.current;
+        lastBoundaryRef.current = boundary;
+        // Resolve the just-closed window
+        resolveClosedWindow(prevBoundary + MS15, prevBoundary);
+        // Fetch new signal
+        refresh(true);
       }
     };
     timerRef.current = setInterval(tick, 1000);
     return () => clearInterval(timerRef.current);
   }, [refresh, resolveClosedWindow]);
 
+  // Initial fetch (not a new window)
   useEffect(() => { if (storageReady) refresh(false); }, [storageReady]);
 
+  // ── Set outcome manually ──
   const setOutcome = useCallback(async (id, outcome) => {
     setTradeLog(prev => {
       const updated = prev.map(e => {
         if (e.id !== id) return e;
         const betPlaced = outcome !== "NO_BET";
-        const newStreak = betPlaced ? outcome === "WIN" ? { wins: streak.wins+1, losses:0 } : { wins:0, losses: streak.losses+1 } : streak;
-        if (betPlaced) { setStreak(newStreak); saveStreak(newStreak); }
+        const newStreak = betPlaced
+          ? outcome === "WIN"
+            ? { wins: streak.wins+1, losses:0 }
+            : { wins:0, losses: streak.losses+1 }
+          : streak;
+        if (betPlaced) {
+          setStreak(newStreak);
+          saveStreak(newStreak);
+        }
         return { ...e, outcome, betPlaced, resolvedAt: Date.now() };
       });
-      saveLog(updated); return updated;
+      saveLog(updated);
+      return updated;
     });
   }, [streak]);
 
+  // ── Export to CSV ──
   const exportCSV = () => {
     const headers = ["date","time","signal","confidence","score","trend","betPrice","livePriceAtSignal","closePriceActual","actualDirection","outcome","betPlaced","signalCorrect","bet_size_pct","ema50","macd","macdSignal","macdHist","atrCurrent","atrAvg","atrRatio","structure","momentumDir","momentumSameDir","momentumExpanding","priceAboveEMA","score_trend","score_momentum","score_volatility","score_macd","score_location","reasoning","warnings"];
-    const rows = tradeLog.map(e => [e.date,e.time,e.signal,e.confidence,e.score,e.trend,e.betPrice,e.livePriceAtSignal,e.closePriceActual??"",e.actualDirection??"",e.outcome,e.betPlaced,e.signalCorrect??"",e.bet_size_pct,e.indicators.ema50,e.indicators.macd,e.indicators.macdSignal,e.indicators.macdHist,e.indicators.atrCurrent,e.indicators.atrAvg,e.indicators.atrRatio,e.indicators.structure,e.indicators.momentumDir,e.indicators.momentumSameDir,e.indicators.momentumExpanding,e.indicators.priceAboveEMA,e.scoreBreakdown.trend,e.scoreBreakdown.momentum,e.scoreBreakdown.volatility,e.scoreBreakdown.macd,e.scoreBreakdown.location,`"${e.reasoning?.join("; ")}"`,`"${e.warnings?.join("; ")}"`].join(","));
+    const rows = tradeLog.map(e => [
+      e.date,e.time,e.signal,e.confidence,e.score,e.trend,
+      e.betPrice,e.livePriceAtSignal,e.closePriceActual??"",e.actualDirection??"",
+      e.outcome,e.betPlaced,e.signalCorrect??"",e.bet_size_pct,
+      e.indicators.ema50,e.indicators.macd,e.indicators.macdSignal,e.indicators.macdHist,
+      e.indicators.atrCurrent,e.indicators.atrAvg,e.indicators.atrRatio,
+      e.indicators.structure,e.indicators.momentumDir,e.indicators.momentumSameDir,e.indicators.momentumExpanding,e.indicators.priceAboveEMA,
+      e.scoreBreakdown.trend,e.scoreBreakdown.momentum,e.scoreBreakdown.volatility,e.scoreBreakdown.macd,e.scoreBreakdown.location,
+      `"${e.reasoning?.join("; ")}"`,`"${e.warnings?.join("; ")}"`
+    ].join(","));
     const csv = [headers.join(","), ...rows].join("\n");
-    const blob = new Blob([csv], {type:"text/csv"}); const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href=url; a.download=`btc_trades_${Date.now()}.csv`; a.click(); URL.revokeObjectURL(url);
+    const blob = new Blob([csv], {type:"text/csv"});
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement("a");
+    a.href=url; a.download=`btc_trades_${Date.now()}.csv`; a.click();
+    URL.revokeObjectURL(url);
   };
 
+  // ── Stats ──
   const bettedEntries  = tradeLog.filter(e => e.betPlaced && e.outcome !== "PENDING");
   const wins           = bettedEntries.filter(e => e.outcome==="WIN").length;
-  const accuracy       = bettedEntries.length > 0 ? Math.round(wins/bettedEntries.length*100) : null;
-  const signalAccuracy = tradeLog.filter(e=>e.signalCorrect!==null).length > 0 ? Math.round(tradeLog.filter(e=>e.signalCorrect===true).length / tradeLog.filter(e=>e.signalCorrect!==null).length * 100) : null;
+  const losses         = bettedEntries.filter(e => e.outcome==="LOSS").length;
+  const accuracy        = bettedEntries.length > 0 ? Math.round(wins/bettedEntries.length*100) : null;
+  const signalAccuracy  = tradeLog.filter(e=>e.signalCorrect!==null).length > 0
+    ? Math.round(tradeLog.filter(e=>e.signalCorrect===true).length / tradeLog.filter(e=>e.signalCorrect!==null).length * 100)
+    : null;
+  const pendingCount    = tradeLog.filter(e=>e.outcome==="PENDING").length;
 
   const sig=result,hardStop=streak.losses>=4;
   const sColor=!sig?"#445":sig.signal==="UP"?GREEN:sig.signal==="DOWN"?RED:"#445";
   const cColor=!sig?"#445":sig.confidence==="HIGH"?GREEN:sig.confidence==="MEDIUM"?AMBER:FG3;
   const meta=sig?._meta;
+  const deltaColor=!meta?FG3:meta.priceVsBet>0?GREEN:meta.priceVsBet<0?RED:FG3;
+  const deltaSign=!meta?"":meta.priceVsBet>=0?"+":"";
   const urgent=msLeft<60000;
   const countdownColor=urgent?RED:msLeft<3*60000?AMBER:GREEN;
-  const srcColor=source==="cryptocompare"||source==="binance"?GREEN:source==="synthetic"?RED:AMBER;
+  const srcColor=source==="binance"?GREEN:source==="synthetic"?RED:AMBER;
 
   return (
-    <div style={{minHeight:"100vh",background:BG,color:FG,fontFamily:"'DM Mono','Courier New',monospace",padding:"18px 14px 100px"}}>
+    <div style={{minHeight:"100vh",background:BG,color:FG,fontFamily:"'DM Mono','Courier New',monospace",padding:"18px 14px"}}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Bebas+Neue&display=swap');
         *{box-sizing:border-box;margin:0;padding:0}
@@ -911,6 +572,10 @@ function BTCDecisionEngine() {
         .card-dn{border-color:${RED}44!important;box-shadow:0 0 20px ${RED}0d}
         .btn{background:${CARD};border:1px solid ${BDR};border-radius:6px;color:${FG3};font-family:inherit;font-size:11px;padding:7px 13px;cursor:pointer;letter-spacing:.08em;transition:all .2s}
         .btn:hover{border-color:${FG4};color:${FG}}
+        .refresh-fab{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:100;background:#1a2540;border:1px solid ${GREEN}55;border-radius:50px;color:${GREEN};font-family:inherit;font-size:13px;padding:14px 32px;cursor:pointer;letter-spacing:.1em;box-shadow:0 4px 24px #000a}
+        .refresh-fab:active{transform:translateX(-50%) scale(0.97)}
+        .btnW{border-color:${GREEN}55;color:${GREEN}}.btnW:hover{background:${GREEN}12}
+        .btnL{border-color:${RED}55;color:${RED}}.btnL:hover{background:${RED}12}
         .tab{background:transparent;border:none;border-bottom:2px solid transparent;color:${FG3};font-family:inherit;font-size:11px;padding:8px 14px;cursor:pointer;letter-spacing:.1em;transition:all .2s}
         .tab.active{color:${FG};border-bottom-color:${GREEN}}
         .tab:hover{color:${FG2}}
@@ -920,63 +585,92 @@ function BTCDecisionEngine() {
         .urgent{animation:urg .6s ease-in-out infinite}@keyframes urg{0%,100%{opacity:1}50%{opacity:.3}}
         input[type=number]{background:${CARD};border:1px solid ${BDR};border-radius:5px;color:${FG};font-family:inherit;font-size:13px;padding:7px 9px;width:100%;outline:none}
         input[type=number]:focus{border-color:${FG4}}
-        .refresh-fab{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:100;background:#1a2540;border:1px solid ${GREEN}55;border-radius:50px;color:${GREEN};font-family:inherit;font-size:13px;padding:14px 32px;cursor:pointer;letter-spacing:.1em;box-shadow:0 4px 24px #000a;transition:all .2s}
-        .refresh-fab:hover{background:#1e2e50;box-shadow:0 4px 32px ${GREEN}33}
-        .refresh-fab:active{transform:translateX(-50%) scale(0.97)}
+        ::-webkit-scrollbar{width:4px}::-webkit-scrollbar-track{background:${BG}}::-webkit-scrollbar-thumb{background:${BDR};border-radius:2px}
       `}</style>
 
-      <div style={{maxWidth:480,margin:"0 auto"}}>
+      <div style={{maxWidth:820,margin:"0 auto"}}>
+
         {/* HEADER */}
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14}}>
           <div>
-            <div style={{fontFamily:"'Bebas Neue'",fontSize:28,letterSpacing:".08em",lineHeight:1}}>BTC DECISION ENGINE</div>
-            <div style={{fontSize:9,color:FG4,letterSpacing:".15em",marginTop:4}}>15-MINUTE WINDOW · BINANCE LIVE · SELF-LOGGING</div>
+            <div style={{fontFamily:"'Bebas Neue'",fontSize:30,color:"#fff",letterSpacing:".06em",lineHeight:1}}>BTC DECISION ENGINE</div>
+            <div style={{fontSize:9,color:FG4,marginTop:3,letterSpacing:".18em"}}>15-MINUTE WINDOW · BINANCE LIVE · SELF-LOGGING</div>
           </div>
-          <div style={{textAlign:"right"}}>
-            <div style={{display:"flex",alignItems:"center",gap:6,justifyContent:"flex-end"}}>
-              <div style={{width:7,height:7,borderRadius:"50%",background:source?srcColor:"#445",boxShadow:source?`0 0 6px ${srcColor}88`:""}} className={loading?"pulse":""} />
+          <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:6}}>
+            <div style={{display:"flex",alignItems:"center",gap:9}}>
+              {loading?<div style={{width:13,height:13,border:`2px solid ${BDR}`,borderTopColor:GREEN,borderRadius:"50%"}} className="spin"/>:<div style={{width:7,height:7,borderRadius:"50%",background:error?RED:GREEN}} className="pulse"/>}
+              <button className="btn" onClick={()=>refresh(false)} disabled={loading}>↻ REFRESH</button>
             </div>
-            <div style={{fontSize:9,color:FG4,marginTop:4}}>{lastRefresh?lastRefresh.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit",second:"2-digit"}):"—"} · <span style={{color:srcColor}}>{source||"—"}</span></div>
-            {tgStatus&&<div style={{fontSize:9,color:GREEN,marginTop:2}}>{tgStatus}</div>}
+            <div style={{fontSize:9,color:FG4}}>
+              {lastRefresh?lastRefresh.toLocaleTimeString():"—"}
+              {source&&<span style={{marginLeft:6,color:srcColor}}>· {source}</span>}
+              {pendingCount>0&&<span style={{marginLeft:6,color:AMBER}}>· {pendingCount} pending</span>}
+            </div>
           </div>
         </div>
 
         {/* TABS */}
-        <div style={{display:"flex",borderBottom:`1px solid ${BDR}`,marginBottom:16,gap:0}}>
+        <div style={{display:"flex",borderBottom:`1px solid ${BDR}`,marginBottom:14}}>
           {[["signal","SIGNAL"],["log","TRADE LOG"],["backtest","BACKTEST"],["export","EXPORT DATA"]].map(([id,label])=>(
-            <button key={id} className={`tab${tab===id?" active":""}`} onClick={()=>setTab(id)}>{label}</button>
+            <button key={id} className={`tab ${tab===id?"active":""}`} onClick={()=>setTab(id)}>{label}
+              {id==="log"&&tradeLog.length>0&&<span style={{marginLeft:5,fontSize:9,color:FG4}}>({tradeLog.length})</span>}
+            </button>
           ))}
         </div>
 
-        {/* COUNTDOWN HEADER */}
-        {tab==="signal"&&(
-          <div className="card fi" style={{marginBottom:12}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-              <div>
-                <div style={{fontSize:9,color:FG4,letterSpacing:".15em",marginBottom:4}}>CURRENT 15M WINDOW</div>
-                <div style={{fontSize:13,color:FG2}}>Opens <span style={{color:FG,fontWeight:700}}>{fmtTime(current15mOpenTime())}</span> → <span style={{color:FG,fontWeight:700}}>{fmtTime(current15mCloseTime())}</span></div>
-              </div>
-              <div style={{textAlign:"right"}}>
-                <div style={{fontSize:9,color:FG4,letterSpacing:".15em",marginBottom:2}}>TIME LEFT</div>
-                <div style={{fontFamily:"'Bebas Neue'",fontSize:36,color:countdownColor,lineHeight:1}} className={urgent?"urgent":""}>{formatCountdown(msLeft)}</div>
-              </div>
-            </div>
-            <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:FG4}}>
-              <span>Signal data: <span style={{color:FG3}}>rolling last 15 mins</span></span>
-              <span style={{color:AMBER}}>Updates every minute</span>
-            </div>
-          </div>
-        )}
-
-        {/* SIGNAL TAB */}
+        {/* ── SIGNAL TAB ── */}
         {tab==="signal"&&(
           <div className="fi">
+            {/* 15M WINDOW */}
+            <div className="card" style={{marginBottom:12,borderColor:urgent?`${RED}66`:BDR}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
+                <div>
+                  <div style={{fontSize:9,color:FG4,letterSpacing:".15em",marginBottom:4}}>CURRENT 15M WINDOW</div>
+                  <div style={{fontSize:10,color:FG3}}>
+                    Opens <span style={{color:FG,fontWeight:700}}>{meta?fmtTime(meta.candleOpenTime):"—"}</span>
+                    {" → "}
+                    <span style={{color:FG,fontWeight:700}}>{meta?fmtTime(meta.candleCloseTime):"—"}</span>
+                  </div>
+                </div>
+                <div style={{textAlign:"right"}}>
+                  <div style={{fontSize:9,color:FG4,letterSpacing:".12em",marginBottom:2}}>TIME LEFT</div>
+                  <div style={{fontFamily:"'Bebas Neue'",fontSize:38,color:countdownColor,lineHeight:1,letterSpacing:".04em"}} className={urgent?"urgent":""}>
+                    {formatCountdown(msLeft)}
+                  </div>
+                </div>
+              </div>
+
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:12}}>
+                {[
+                  {label:"BET PRICE",value:meta?`$${meta.betPrice.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2})}`:"—",sub:"at 15m open",color:AMBER},
+                  {label:"LIVE PRICE",value:meta?`$${meta.livePrice.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2})}`:"—",sub:"right now",color:FG},
+                  {label:"VS BET",value:meta?`${deltaSign}${meta.priceVsBet.toFixed(0)}`:"—",sub:meta?`${deltaSign}${meta.priceVsBetPct.toFixed(3)}%`:"—",color:deltaColor},
+                ].map(({label,value,sub,color})=>(
+                  <div key={label} style={{background:"#070c18",borderRadius:8,padding:"10px 12px"}}>
+                    <div style={{fontSize:9,color:FG4,letterSpacing:".12em",marginBottom:4}}>{label}</div>
+                    <div style={{fontFamily:"'Bebas Neue'",fontSize:20,color,lineHeight:1}}>{value}</div>
+                    <div style={{fontSize:9,color:color===FG?FG4:color,marginTop:3,opacity:.8}}>{sub}</div>
+                  </div>
+                ))}
+              </div>
+              {meta&&<WindowProgress msUntilClose={msLeft}/>}
+            </div>
+
+            {/* BACKEND WARNING */}
+            {API_BASE.includes("YOUR-APP-NAME")&&(
+              <div className="card fi" style={{borderColor:`${AMBER}55`,marginBottom:12,fontSize:11,color:AMBER,lineHeight:1.7}}>
+                ⚠ Backend not connected — running on synthetic data.<br/>
+                <span style={{color:FG3}}>Deploy backend to Railway and update <code style={{color:FG2}}>API_BASE</code>.</span>
+              </div>
+            )}
+
             {loading&&<div className="card fi" style={{marginBottom:12,textAlign:"center",padding:26}}>
               <div style={{fontSize:12,color:FG2,letterSpacing:".12em"}}>{loadMsg}</div>
               <div style={{display:"flex",justifyContent:"center",gap:5,marginTop:12}}>
                 {[0,1,2,3,4].map(i=><div key={i} style={{width:5,height:5,borderRadius:"50%",background:GREEN,animation:`pl 1.1s ease-in-out ${i*.13}s infinite`}}/>)}
               </div>
             </div>}
+
             {error&&!loading&&<div className="card fi" style={{borderColor:`${RED}44`,marginBottom:12,fontSize:12,color:RED}}>{error}</div>}
             {hardStop&&<div className="card fi" style={{borderColor:`${RED}88`,marginBottom:12,background:"#180a0e",textAlign:"center",padding:18}}>
               <div style={{fontFamily:"'Bebas Neue'",fontSize:26,color:RED,letterSpacing:".1em"}}>⛔ HARD STOP ACTIVE</div>
@@ -986,6 +680,7 @@ function BTCDecisionEngine() {
 
             {sig&&!loading&&(
               <>
+                {/* SIGNAL ROW */}
                 <div style={{display:"grid",gridTemplateColumns:"1.3fr .8fr 1fr 1fr",gap:10,marginBottom:12}}>
                   <div className={`card ${sig.signal==="UP"?"card-up":sig.signal==="DOWN"?"card-dn":""}`} style={{textAlign:"center",padding:"20px 10px"}}>
                     <div style={{fontSize:9,color:FG4,letterSpacing:".15em",marginBottom:8}}>PREDICT</div>
@@ -1002,41 +697,21 @@ function BTCDecisionEngine() {
                     <div style={{fontSize:9,color:FG4,letterSpacing:".15em",marginBottom:8}}>CONFIDENCE</div>
                     <div style={{fontFamily:"'Bebas Neue'",fontSize:24,color:cColor,lineHeight:1.1}}>{sig.confidence}</div>
                     <div style={{fontSize:9,color:FG4,marginTop:10}}>BET SIZE</div>
-                    <div style={{fontFamily:"'Bebas Neue'",fontSize:32,color:hardStop?RED:sig.bet_size_percent>0?AMBER:FG4,marginTop:2}}>{hardStop?"STOP":`${sig.bet_size_percent}%`}</div>
+                    <div style={{fontFamily:"'Bebas Neue'",fontSize:32,color:hardStop?RED:sig.bet_size_percent>0?AMBER:FG4,marginTop:2}}>
+                      {hardStop?"STOP":`${sig.bet_size_percent}%`}
+                    </div>
                   </div>
                   <div className="card" style={{textAlign:"center"}}>
                     <div style={{fontSize:9,color:FG4,letterSpacing:".15em",marginBottom:8}}>BANKROLL</div>
                     <input type="number" value={bankroll} onChange={e=>setBankroll(Math.max(0,+e.target.value))} style={{textAlign:"center",marginBottom:10}}/>
                     <div style={{fontSize:9,color:FG4}}>BET AMOUNT</div>
-                    <div style={{fontFamily:"'Bebas Neue'",fontSize:26,color:FG,marginTop:3}}>${((bankroll*(hardStop?0:sig.bet_size_percent))/100).toFixed(2)}</div>
+                    <div style={{fontFamily:"'Bebas Neue'",fontSize:26,color:FG,marginTop:3}}>
+                      ${((bankroll*(hardStop?0:sig.bet_size_percent))/100).toFixed(2)}
+                    </div>
                   </div>
                 </div>
 
-                <div className="card" style={{marginBottom:12}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-                    <div>
-                      <div style={{fontSize:9,color:FG4,letterSpacing:".15em",marginBottom:2}}>CURRENT 15M WINDOW</div>
-                      <div style={{fontSize:13,color:FG2}}>
-                        <span style={{color:AMBER,fontWeight:700}}>${meta?.betPrice.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2})}</span>
-                        <span style={{color:FG4,fontSize:10}}> WINDOW OPEN</span>
-                      </div>
-                    </div>
-                    <div style={{textAlign:"center"}}>
-                      <div style={{fontSize:9,color:FG4,marginBottom:2}}>LIVE PRICE</div>
-                      <div style={{fontFamily:"'Bebas Neue'",fontSize:22,color:FG}}>${meta?.livePrice.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
-                      <div style={{fontSize:10,color:FG4}}>right now</div>
-                    </div>
-                    <div style={{textAlign:"right"}}>
-                      <div style={{fontSize:9,color:FG4,marginBottom:2}}>VS WINDOW OPEN</div>
-                      <div style={{fontFamily:"'Bebas Neue'",fontSize:22,color:meta?.priceVsBet>=0?GREEN:RED}}>
-                        {meta?.priceVsBet>=0?"+":""}{meta?.priceVsBet.toFixed(0)}
-                      </div>
-                      <div style={{fontSize:10,color:FG4}}>{meta?.priceVsBetPct>=0?"+":""}{meta?.priceVsBetPct.toFixed(3)}%</div>
-                    </div>
-                  </div>
-                  <WindowProgress msUntilClose={msLeft}/>
-                </div>
-
+                {/* EMA + CHART */}
                 <div className="card" style={{marginBottom:12,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                   <div>
                     <div style={{fontSize:9,color:FG4,letterSpacing:".15em",marginBottom:4}}>EMA50</div>
@@ -1051,14 +726,15 @@ function BTCDecisionEngine() {
                   </div>
                 </div>
 
+                {/* BREAKDOWN + REASONING */}
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
                   <div className="card">
                     <div style={{fontSize:9,color:FG4,letterSpacing:".15em",marginBottom:14}}>SCORE BREAKDOWN</div>
-                    <ScoreBar label="TREND" value={sig._meta.bd.trend} color={BLUE}/>
-                    <ScoreBar label="MOMENTUM" value={sig._meta.bd.momentum} color={GREEN}/>
-                    <ScoreBar label="VOLATILITY" value={sig._meta.bd.volatility} color="#a78bfa"/>
-                    <ScoreBar label="MACD STRENGTH" value={sig._meta.bd.macd} color={AMBER}/>
-                    <ScoreBar label="LOCATION PENALTY" value={sig._meta.bd.location} max={0} color={RED}/>
+                    <ScoreBar label="TREND"            value={sig._meta.bd.trend}      color={BLUE}/>
+                    <ScoreBar label="MOMENTUM"         value={sig._meta.bd.momentum}   color={GREEN}/>
+                    <ScoreBar label="VOLATILITY"       value={sig._meta.bd.volatility}  color="#a78bfa"/>
+                    <ScoreBar label="MACD STRENGTH"    value={sig._meta.bd.macd}       color={AMBER}/>
+                    <ScoreBar label="LOCATION PENALTY" value={sig._meta.bd.location}   max={0} color={RED}/>
                     <div style={{borderTop:`1px solid ${BDR}`,marginTop:12,paddingTop:10,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                       <span style={{fontSize:11,color:FG2}}>TOTAL SCORE</span>
                       <span style={{fontFamily:"'Bebas Neue'",fontSize:20,color:sig.score>=6?GREEN:sig.score<=3?RED:AMBER}}>{sig.score} / 8</span>
@@ -1088,12 +764,13 @@ function BTCDecisionEngine() {
                   </div>
                 </div>
 
+                {/* INDICATORS */}
                 <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:12}}>
                   {[
-                    {label:"MACD",value:sig._meta.macd.macd.toFixed(0),sub:`SIG ${sig._meta.macd.signal.toFixed(0)}`,color:sig._meta.macd.macd>0?GREEN:RED},
-                    {label:"HIST",value:sig._meta.macd.hist.toFixed(0),sub:Math.abs(sig._meta.macd.hist)>Math.abs(sig._meta.macd.histPrev)?"EXPANDING":"SHRINKING",color:sig._meta.macd.hist>0?GREEN:RED},
-                    {label:"ATR",value:`$${sig._meta.atr.current.toFixed(0)}`,sub:`AVG $${sig._meta.atr.avg.toFixed(0)}`,color:sig._meta.atr.current>sig._meta.atr.avg?GREEN:AMBER},
-                    {label:"TREND",value:sig._meta.st.trend,sub:"STRUCTURE",color:sig._meta.st.trend==="UP"?GREEN:sig._meta.st.trend==="DOWN"?RED:FG3},
+                    {label:"MACD",  value:sig._meta.macd.macd.toFixed(0),  sub:`SIG ${sig._meta.macd.signal.toFixed(0)}`,color:sig._meta.macd.macd>0?GREEN:RED},
+                    {label:"HIST",  value:sig._meta.macd.hist.toFixed(0),   sub:Math.abs(sig._meta.macd.hist)>Math.abs(sig._meta.macd.histPrev)?"EXPANDING":"SHRINKING",color:sig._meta.macd.hist>0?GREEN:RED},
+                    {label:"ATR",   value:`$${sig._meta.atr.current.toFixed(0)}`,sub:`AVG $${sig._meta.atr.avg.toFixed(0)}`,color:sig._meta.atr.current>sig._meta.atr.avg?GREEN:AMBER},
+                    {label:"TREND", value:sig._meta.st.trend,sub:"STRUCTURE",color:sig._meta.st.trend==="UP"?GREEN:sig._meta.st.trend==="DOWN"?RED:FG3},
                   ].map(({label,value,sub,color})=>(
                     <div key={label} className="card" style={{textAlign:"center"}}>
                       <div style={{fontSize:9,color:FG4,letterSpacing:".12em",marginBottom:6}}>{label}</div>
@@ -1103,16 +780,17 @@ function BTCDecisionEngine() {
                   ))}
                 </div>
 
+                {/* STREAK SUMMARY */}
                 <div className="card" style={{marginBottom:12}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
                     <div style={{fontSize:9,color:FG4,letterSpacing:".15em"}}>SESSION PERFORMANCE</div>
                     <div style={{display:"flex",gap:16}}>
                       {[
-                        {label:"ACCURACY",value:accuracy!==null?`${accuracy}%`:"—",color:accuracy>=60?GREEN:accuracy<40?RED:AMBER},
-                        {label:"SIG ACC",value:signalAccuracy!==null?`${signalAccuracy}%`:"—",color:signalAccuracy>=60?GREEN:signalAccuracy<40?RED:AMBER},
-                        {label:"WIN STK",value:streak.wins,color:GREEN},
-                        {label:"LOSS STK",value:streak.losses,color:streak.losses>=3?RED:FG},
-                        {label:"TRADES",value:bettedEntries.length,color:FG2},
+                        {label:"ACCURACY",  value:accuracy!==null?`${accuracy}%`:"—",  color:accuracy>=60?GREEN:accuracy<40?RED:AMBER},
+                        {label:"SIG ACC",   value:signalAccuracy!==null?`${signalAccuracy}%`:"—", color:signalAccuracy>=60?GREEN:signalAccuracy<40?RED:AMBER},
+                        {label:"WIN STK",   value:streak.wins,   color:GREEN},
+                        {label:"LOSS STK",  value:streak.losses, color:streak.losses>=3?RED:FG},
+                        {label:"TRADES",    value:bettedEntries.length, color:FG2},
                       ].map(({label,value,color})=>(
                         <div key={label} style={{textAlign:"center"}}>
                           <div style={{fontSize:8,color:FG4}}>{label}</div>
@@ -1128,25 +806,38 @@ function BTCDecisionEngine() {
           </div>
         )}
 
-        {/* TRADE LOG TAB */}
+        {/* ── TRADE LOG TAB ── */}
         {tab==="log"&&(
           <div className="fi">
             <div className="card" style={{marginBottom:12,padding:"10px 0"}}>
+              {/* Column headers */}
               <div style={{display:"grid",gridTemplateColumns:"80px 60px 50px 50px 90px 90px 90px 1fr",gap:6,padding:"6px 12px 10px",borderBottom:`1px solid ${BDR}`,fontSize:9,color:FG4,letterSpacing:".1em"}}>
-                <span>TIME</span><span>SIGNAL</span><span>SCORE</span><span>CONF</span><span>BET PRICE</span><span>CLOSE</span><span>OUTCOME</span><span>ACTION</span>
+                <span>TIME</span><span>SIGNAL</span><span>SCORE</span><span>CONF</span>
+                <span>BET PRICE</span><span>CLOSE</span><span>OUTCOME</span><span>ACTION</span>
               </div>
-              {tradeLog.length===0&&<div style={{textAlign:"center",padding:40,color:FG4,fontSize:12}}>No trades logged yet.</div>}
+
+              {tradeLog.length===0&&(
+                <div style={{textAlign:"center",padding:40,color:FG4,fontSize:12}}>
+                  No trades logged yet. Signals are auto-logged every 15 minutes.
+                </div>
+              )}
+
+              {/* Scrollable log */}
               <div style={{maxHeight:500,overflowY:"auto"}}>
-                {tradeLog.map(entry=>(<LogRow key={entry.id} entry={entry} onSetOutcome={setOutcome}/>))}
+                {tradeLog.map(entry=>(
+                  <LogRow key={entry.id} entry={entry} onSetOutcome={setOutcome}/>
+                ))}
               </div>
             </div>
+
+            {/* Stats summary */}
             {tradeLog.length>0&&(
               <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
                 {[
-                  {label:"TOTAL SIGNALS",value:tradeLog.length,color:FG2},
-                  {label:"BETS PLACED",value:bettedEntries.length,color:BLUE},
-                  {label:"WIN RATE",value:accuracy!==null?`${accuracy}%`:"—",color:accuracy>=60?GREEN:accuracy<40?RED:AMBER},
-                  {label:"SIGNAL ACCURACY",value:signalAccuracy!==null?`${signalAccuracy}%`:"—",color:signalAccuracy>=60?GREEN:signalAccuracy<40?RED:AMBER},
+                  {label:"TOTAL SIGNALS",   value:tradeLog.length,        color:FG2},
+                  {label:"BETS PLACED",     value:bettedEntries.length,   color:BLUE},
+                  {label:"WIN RATE",        value:accuracy!==null?`${accuracy}%`:"—", color:accuracy>=60?GREEN:accuracy<40?RED:AMBER},
+                  {label:"SIGNAL ACCURACY", value:signalAccuracy!==null?`${signalAccuracy}%`:"—", color:signalAccuracy>=60?GREEN:signalAccuracy<40?RED:AMBER},
                 ].map(({label,value,color})=>(
                   <div key={label} className="card" style={{textAlign:"center"}}>
                     <div style={{fontSize:9,color:FG4,marginBottom:6}}>{label}</div>
@@ -1158,41 +849,107 @@ function BTCDecisionEngine() {
           </div>
         )}
 
-        {/* BACKTEST TAB */}
-        {tab==="backtest"&&<BacktestTab/>}
+        {/* ── EXPORT TAB ── */}
+        {tab==="backtest"&&(
+          <div className="fi">
+            <div className="card" style={{marginBottom:12}}>
+              <div style={{fontSize:9,color:FG4,letterSpacing:".15em",marginBottom:8}}>BACKTEST — 15M CANDLES</div>
+              <div style={{fontSize:12,color:FG2,lineHeight:1.7,marginBottom:14}}>
+                Fetches real 15-minute BTC candles and runs the signal engine on each window to check historical accuracy.
+              </div>
+              <button className="btn" style={{color:GREEN,borderColor:`${GREEN}55`,padding:"12px 24px",fontSize:13,width:"100%"}}
+                onClick={async()=>{
+                  setLoadMsg("Running backtest...");setLoading(true);
+                  try {
+                    const r = await fetch(`${API_BASE}/candles?limit=200`);
+                    const candles = await r.json();
+                    let signals=0,correct=0;
+                    for(let i=50;i<candles.length-1;i++){
+                      const slice=candles.slice(0,i+1);
+                      const cur=slice[slice.length-1];
+                      const next=candles[i+1];
+                      const sig=runEngine(slice,cur.open,cur.close,{wins:0,losses:0});
+                      if(sig.signal!=="NO BET"){
+                        signals++;
+                        const actualDir=next.close>cur.close?"UP":"DOWN";
+                        if(sig.signal===actualDir) correct++;
+                      }
+                    }
+                    alert(`Backtest: ${candles.length} candles\nSignals: ${signals}\nCorrect: ${correct}\nWin rate: ${signals>0?Math.round(correct/signals*100):0}%\nP&L: $${correct*90-(signals-correct)*100}`);
+                  } catch(e){alert("Backtest failed: "+e.message);}
+                  finally{setLoading(false);setLoadMsg("");}
+                }}>
+                ▶ RUN BACKTEST
+              </button>
+            </div>
+            <div className="card" style={{borderColor:`${BLUE}33`}}>
+              <div style={{fontSize:9,color:FG4,letterSpacing:".15em",marginBottom:12}}>TELEGRAM</div>
+              <div style={{fontSize:12,color:FG2,lineHeight:1.9}}>
+                Telegram notifications are configured on the Railway backend and fire automatically every minute when a signal appears or changes (score ≥ 4).
+                <div style={{marginTop:10,color:AMBER}}>Bot: @MmyyBTCsignal_bot</div>
+              </div>
+            </div>
+          </div>
+        )}
 
-        {/* EXPORT TAB */}
         {tab==="export"&&(
           <div className="fi">
             <div className="card" style={{marginBottom:12}}>
               <div style={{fontSize:9,color:FG4,letterSpacing:".15em",marginBottom:12}}>EXPORT TRADE DATA</div>
+              <div style={{fontSize:12,color:FG2,lineHeight:1.8,marginBottom:16}}>
+                Every logged signal includes: timestamp, signal, confidence, score, bet price, close price, actual direction, outcome, full indicator snapshot (EMA50, MACD, ATR, structure, momentum), and score breakdown. Use this CSV to train a model or analyze what setups actually perform.
+              </div>
               <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
-                <button className="btn" style={{color:GREEN,borderColor:`${GREEN}55`,padding:"10px 20px",fontSize:12}} onClick={exportCSV}>↓ EXPORT CSV ({tradeLog.length} rows)</button>
-                <button className="btn" style={{color:BLUE,borderColor:`${BLUE}55`,padding:"10px 20px",fontSize:12}} onClick={()=>{const json=JSON.stringify(tradeLog,null,2);const blob=new Blob([json],{type:"application/json"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=`btc_trades_${Date.now()}.json`;a.click();URL.revokeObjectURL(url);}}>↓ EXPORT JSON ({tradeLog.length} rows)</button>
-                <button className="btn" style={{color:RED,borderColor:`${RED}44`,padding:"10px 20px",fontSize:12}} onClick={async()=>{if(confirm("Delete all logged trades?")) {await saveLog([]);setTradeLog([]);}}}>✕ CLEAR LOG</button>
+                <button className="btn" style={{color:GREEN,borderColor:`${GREEN}55`,padding:"10px 20px",fontSize:12}} onClick={exportCSV}>
+                  ↓ EXPORT CSV ({tradeLog.length} rows)
+                </button>
+                <button className="btn" style={{color:BLUE,borderColor:`${BLUE}55`,padding:"10px 20px",fontSize:12}} onClick={()=>{
+                  const json=JSON.stringify(tradeLog,null,2);
+                  const blob=new Blob([json],{type:"application/json"});
+                  const url=URL.createObjectURL(blob);
+                  const a=document.createElement("a");
+                  a.href=url;a.download=`btc_trades_${Date.now()}.json`;a.click();
+                  URL.revokeObjectURL(url);
+                }}>
+                  ↓ EXPORT JSON ({tradeLog.length} rows)
+                </button>
+                <button className="btn" style={{color:RED,borderColor:`${RED}44`,padding:"10px 20px",fontSize:12}} onClick={async()=>{
+                  if(confirm("Delete all logged trades? This cannot be undone.")) {
+                    await saveLog([]);
+                    setTradeLog([]);
+                  }
+                }}>
+                  ✕ CLEAR LOG
+                </button>
               </div>
             </div>
 
-            {/* TELEGRAM SETUP */}
-            <div className="card" style={{borderColor:`${BLUE}33`}}>
-              <div style={{fontSize:9,color:FG4,letterSpacing:".15em",marginBottom:12}}>TELEGRAM SETUP</div>
-              <div style={{fontSize:12,color:FG2,lineHeight:1.9}}>
-                <div style={{color:GREEN,marginBottom:8}}>Step 1 — Create your bot:</div>
-                Open Telegram → search <span style={{color:FG}}>@BotFather</span> → send <span style={{color:AMBER}}>/newbot</span> → follow prompts → copy the <span style={{color:FG}}>API token</span>
-                <div style={{color:GREEN,marginBottom:8,marginTop:12}}>Step 2 — Get your Chat ID:</div>
-                Search <span style={{color:FG}}>@userinfobot</span> in Telegram → send any message → copy your <span style={{color:FG}}>Id</span> number
-                <div style={{color:GREEN,marginBottom:8,marginTop:12}}>Step 3 — Update the app:</div>
-                Open <span style={{color:FG}}>public/index.html</span> on your computer and find these two lines near the top:
-                <pre style={{background:"#0a0f1c",padding:"10px",borderRadius:6,marginTop:8,fontSize:11,color:AMBER,overflowX:"auto"}}>
-{`const TG_BOT_TOKEN = ""; // paste your token here
-const TG_CHAT_ID   = ""; // paste your chat ID here`}
-                </pre>
-                <div style={{color:GREEN,marginBottom:8,marginTop:12}}>Step 4 — Deploy:</div>
-                Save the file, then run: <span style={{color:AMBER}}>git add . && git commit -m "add telegram" && git push</span>
-                <div style={{color:FG3,fontSize:11,marginTop:12}}>
-                  Notifications fire automatically at each 15-minute boundary when score ≥ {TG_MIN_SCORE} and signal is UP or DOWN.
-                </div>
-              </div>
+            {/* Schema preview */}
+            <div className="card">
+              <div style={{fontSize:9,color:FG4,letterSpacing:".15em",marginBottom:12}}>DATA SCHEMA (per row)</div>
+              <pre style={{fontSize:10,color:FG3,lineHeight:1.9,overflowX:"auto"}}>
+{`date, time                   — when the 15m window opened
+signal                       — UP / DOWN / NO BET
+confidence                   — HIGH / MEDIUM / LOW
+score                        — -2 to 8
+trend                        — UP / DOWN / CHOP
+betPrice                     — price at the 15m boundary
+livePriceAtSignal            — price when signal was generated
+closePriceActual             — price at window close (auto-fetched)
+actualDirection              — UP / DOWN (what price actually did)
+outcome                      — WIN / LOSS / NO_BET
+betPlaced                    — true / false
+signalCorrect                — true / false / null
+bet_size_pct                 — 0–6
+ema50                        — EMA(50) value
+macd, macdSignal, macdHist   — MACD components
+atrCurrent, atrAvg, atrRatio — ATR values
+structure                    — market structure trend
+momentumDir, sameDir, expand — momentum state
+priceAboveEMA                — boolean
+score_trend/momentum/...     — individual score components
+reasoning, warnings          — text arrays`}
+              </pre>
             </div>
           </div>
         )}
@@ -1201,8 +958,6 @@ const TG_CHAT_ID   = ""; // paste your chat ID here`}
           NOT FINANCIAL ADVICE · EDUCATIONAL TOOL ONLY
         </div>
       </div>
-
-      {/* FLOATING REFRESH BUTTON */}
       <button className="refresh-fab" onClick={()=>refresh(false)} disabled={loading}>
         {loading ? "⏳ LOADING..." : "↺  REFRESH"}
       </button>
