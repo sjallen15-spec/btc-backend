@@ -83,7 +83,7 @@ async function saveStreak(streak) {
 // DATA FETCH
 // ═══════════════════════════════════════════════════════════════
 async function fetchBTCData() {
-  const r = await fetch(`${API_BASE}/btc?interval=15m&limit=100`);
+  const r = await fetch(`${API_BASE}/api/btc?interval=15m&limit=100`);
   if (!r.ok) throw new Error(`Backend error: ${r.status}`);
   return r.json();
 }
@@ -415,7 +415,7 @@ function BTCDecisionEngine() {
     try {
       let closePrice = null;
       try {
-        const r = await fetch(`${API_BASE}/candles?interval=15m&limit=5`);
+        const r = await fetch(`${API_BASE}/api/candles?interval=15m&limit=5`);
         if (r.ok) {
           const candles = await r.json();
           // Find the candle that matches this window
@@ -562,7 +562,7 @@ function BTCDecisionEngine() {
   const deltaSign=!meta?"":meta.priceVsBet>=0?"+":"";
   const urgent=msLeft<60000;
   const countdownColor=urgent?RED:msLeft<3*60000?AMBER:GREEN;
-  const srcColor=source==="binance"?GREEN:source==="synthetic"?RED:AMBER;
+  const srcColor=source==="cryptocompare"||source==="binance"?GREEN:source==="synthetic"?RED:AMBER;
 
   return (
     <div style={{minHeight:"100vh",background:BG,color:FG,fontFamily:"'DM Mono','Courier New',monospace",padding:"18px 14px"}}>
@@ -611,7 +611,7 @@ function BTCDecisionEngine() {
 
         {/* TABS */}
         <div style={{display:"flex",borderBottom:`1px solid ${BDR}`,marginBottom:14}}>
-          {[["signal","SIGNAL"],["log","TRADE LOG"],["export","EXPORT DATA"]].map(([id,label])=>(
+          {[["signal","SIGNAL"],["log","TRADE LOG"],["backtest","BACKTEST"],["export","EXPORT DATA"]].map(([id,label])=>(
             <button key={id} className={`tab ${tab===id?"active":""}`} onClick={()=>setTab(id)}>{label}
               {id==="log"&&tradeLog.length>0&&<span style={{marginLeft:5,fontSize:9,color:FG4}}>({tradeLog.length})</span>}
             </button>
@@ -850,6 +850,52 @@ function BTCDecisionEngine() {
         )}
 
         {/* ── EXPORT TAB ── */}
+        {tab==="backtest"&&(
+          <div style={{animation:"fi .4s ease"}}>
+            <div style={{background:"#0d1120",border:"1px solid #1e2840",borderRadius:10,padding:15,marginBottom:12}}>
+              <div style={{fontSize:9,color:"#3a4a6a",letterSpacing:".15em",marginBottom:8}}>BACKTEST — 15M CANDLES</div>
+              <div style={{fontSize:12,color:"#a8b8d8",lineHeight:1.7,marginBottom:14}}>
+                Fetches real 15-minute BTC candles and runs the signal engine on each window to check historical accuracy.
+              </div>
+              <button style={{background:"#0d1120",border:"1px solid rgba(0,232,154,0.33)",borderRadius:6,color:"#00e89a",fontFamily:"inherit",fontSize:13,padding:"12px 24px",cursor:"pointer",width:"100%",letterSpacing:".08em"}}
+                onClick={async()=>{
+                  try {
+                    const r = await fetch(`${API_BASE}/api/candles?limit=200`);
+                    const candles = await r.json();
+                    if(!Array.isArray(candles)||candles.length<50){alert("Not enough candle data");return;}
+                    let signals=0,correct=0,up=0,down=0;
+                    for(let i=50;i<candles.length-1;i++){
+                      const slice=candles.slice(0,i+1);
+                      const cur=slice[slice.length-1];
+                      const next=candles[i+1];
+                      const sig=runEngine(slice,cur.open,cur.close,{wins:0,losses:0});
+                      if(sig.signal!=="NO BET"){
+                        signals++;
+                        const actualDir=next.close>cur.close?"UP":"DOWN";
+                        if(sig.signal===actualDir){correct++;if(sig.signal==="UP")up++;else down++;}
+                      }
+                    }
+                    alert("BACKTEST RESULTS\n"+
+                      "Windows tested: "+(candles.length-50)+"\n"+
+                      "Signals fired: "+signals+"\n"+
+                      "Correct: "+correct+"\n"+
+                      "Win rate: "+(signals>0?Math.round(correct/signals*100):0)+"%\n"+
+                      "P&L ($100/trade): $"+(correct*90-(signals-correct)*100));
+                  } catch(e){alert("Backtest failed: "+e.message);}
+                }}>
+                RUN BACKTEST
+              </button>
+            </div>
+            <div style={{background:"#0d1120",border:"1px solid rgba(91,141,238,0.2)",borderRadius:10,padding:15}}>
+              <div style={{fontSize:9,color:"#3a4a6a",letterSpacing:".15em",marginBottom:12}}>TELEGRAM ALERTS</div>
+              <div style={{fontSize:12,color:"#a8b8d8",lineHeight:1.9}}>
+                Configured on Railway backend. Fires every minute when signal changes (score 4+).
+                <div style={{marginTop:10,color:"#ffb830"}}>Bot: @MmyyBTCsignal_bot</div>
+              </div>
+            </div>
+          </div>
+        )}
+
         {tab==="export"&&(
           <div className="fi">
             <div className="card" style={{marginBottom:12}}>
@@ -925,5 +971,4 @@ const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(React.createElement(BTCDecisionEngine));
   </script>
 </body>
-</html> 
- 
+</html>
