@@ -185,9 +185,9 @@ function runEngine(candles, betPrice, livePrice, streak) {
   loc.reason&&warnings.push(loc.reason);
   if(at.current<at.avg*0.5){warnings.push("Volatility too low — suppressed");score=Math.min(score,3);}
 
-  const bv=[livePrice>e50,mom.dir==="UP",m.macd>m.signal].filter(Boolean).length;
-  const bvD=[livePrice<e50,mom.dir==="DOWN",m.macd<m.signal].filter(Boolean).length;
-  let rawDir=bv>=2&&bvD===0?"UP":bvD>=2&&bv===0?"DOWN":"MIXED";
+  const bv =[livePrice>e50, mom.dir==="UP",   m.macd>0, m.macd>m.signal].filter(Boolean).length;
+  const bvD=[livePrice<e50, mom.dir==="DOWN",  m.macd<0, m.macd<m.signal].filter(Boolean).length;
+  let rawDir=bv>=3?"UP":bvD>=3?"DOWN":bv>=2&&bvD===0?"UP":bvD>=2&&bv===0?"DOWN":"MIXED";
   let revBlock=false;
   if(rawDir==="UP"&&st.trend==="DOWN"&&livePrice<=st.prevSwingHigh){revBlock=true;warnings.push("Reversal filter: lower high not broken");}
 
@@ -202,10 +202,12 @@ function runEngine(candles, betPrice, livePrice, streak) {
   streak.losses>=4&&warnings.push("HARD STOP — 4 consecutive losses");
   Math.abs(priceVsBetPct)>0.1&&reasoning.push(`Price ${priceVsBetPct>0?"+":""}${priceVsBetPct.toFixed(2)}% vs bet price`);
 
+  // expose vote counts for backtest analysis
   return {
     timestamp:new Date().toISOString(),signal,confidence,
     score:Math.max(-2,Math.min(8,score)),trend:st.trend,
     reasoning:reasoning.slice(0,5),bet_size_percent:betSize,warnings:warnings.slice(0,4),
+    _bv:bv,_bvD:bvD,_rawDir:rawDir,
     _meta:{livePrice,betPrice,priceVsBet,priceVsBetPct,candleDir,e50,macd:m,atr:at,mom,st,bd,candles:candles.slice(-30)},
   };
 }
@@ -574,6 +576,9 @@ function BTCDecisionEngine() {
         .card-dn{border-color:${RED}44!important;box-shadow:0 0 20px ${RED}0d}
         .btn{background:${CARD};border:1px solid ${BDR};border-radius:6px;color:${FG3};font-family:inherit;font-size:11px;padding:7px 13px;cursor:pointer;letter-spacing:.08em;transition:all .2s}
         .btn:hover{border-color:${FG4};color:${FG}}
+        .refresh-fab{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:999;background:#1a2540;border:2px solid ${GREEN}66;border-radius:50px;color:${GREEN};font-family:inherit;font-size:14px;font-weight:700;padding:15px 36px;cursor:pointer;letter-spacing:.12em;box-shadow:0 4px 32px #000c;white-space:nowrap}
+        .refresh-fab:active{transform:translateX(-50%) scale(0.96)}
+        .refresh-fab:disabled{opacity:0.6}
         .btnW{border-color:${GREEN}55;color:${GREEN}}.btnW:hover{background:${GREEN}12}
         .btnL{border-color:${RED}55;color:${RED}}.btnL:hover{background:${RED}12}
         .tab{background:transparent;border:none;border-bottom:2px solid transparent;color:${FG3};font-family:inherit;font-size:11px;padding:8px 14px;cursor:pointer;letter-spacing:.1em;transition:all .2s}
@@ -851,46 +856,67 @@ function BTCDecisionEngine() {
 
         {/* ── EXPORT TAB ── */}
         {tab==="backtest"&&(
-          <div style={{animation:"fi .4s ease"}}>
-            <div style={{background:"#0d1120",border:"1px solid #1e2840",borderRadius:10,padding:15,marginBottom:12}}>
-              <div style={{fontSize:9,color:"#3a4a6a",letterSpacing:".15em",marginBottom:8}}>BACKTEST — 15M CANDLES</div>
-              <div style={{fontSize:12,color:"#a8b8d8",lineHeight:1.7,marginBottom:14}}>
-                Fetches real 15-minute BTC candles and runs the signal engine on each window to check historical accuracy.
+          <div className="fi">
+            <div className="card" style={{marginBottom:12}}>
+              <div style={{fontSize:9,color:FG4,letterSpacing:".15em",marginBottom:8}}>BACKTEST — 15M CANDLES</div>
+              <div style={{fontSize:12,color:FG2,lineHeight:1.7,marginBottom:14}}>
+                Fetches real 15-minute BTC candles, runs the signal engine on every window, checks accuracy, and exports a CSV for optimization analysis.
               </div>
-              <button style={{background:"#0d1120",border:"1px solid rgba(0,232,154,0.33)",borderRadius:6,color:"#00e89a",fontFamily:"inherit",fontSize:13,padding:"12px 24px",cursor:"pointer",width:"100%",letterSpacing:".08em"}}
+              <button className="btn" style={{color:GREEN,borderColor:`${GREEN}55`,padding:"12px 24px",fontSize:13,width:"100%",marginBottom:8}}
                 onClick={async()=>{
                   try {
-                    const r = await fetch(`${API_BASE}/api/candles?limit=200`);
+                    const r = await fetch(`${API_BASE}/api/candles?limit=300`);
                     const candles = await r.json();
-                    if(!Array.isArray(candles)||candles.length<50){alert("Not enough candle data");return;}
-                    let signals=0,correct=0,up=0,down=0;
+                    if(!Array.isArray(candles)||candles.length<52){alert("Not enough data — backend may be down");return;}
+                    const results=[];
                     for(let i=50;i<candles.length-1;i++){
                       const slice=candles.slice(0,i+1);
                       const cur=slice[slice.length-1];
                       const next=candles[i+1];
                       const sig=runEngine(slice,cur.open,cur.close,{wins:0,losses:0});
-                      if(sig.signal!=="NO BET"){
-                        signals++;
-                        const actualDir=next.close>cur.close?"UP":"DOWN";
-                        if(sig.signal===actualDir){correct++;if(sig.signal==="UP")up++;else down++;}
-                      }
+                      const actualDir=next.close>cur.close?"UP":"DOWN";
+                      const signalCorrect=sig.signal!=="NO BET"?sig.signal===actualDir?"TRUE":"FALSE":"N/A";
+                      results.push({
+                        time:new Date(cur.time).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}),
+                        date:new Date(cur.time).toLocaleDateString([],{month:"short",day:"numeric"}),
+                        signal:sig.signal,
+                        confidence:sig.confidence,
+                        score:sig.score,
+                        trend:sig.trend,
+                        openPrice:cur.open,
+                        closePrice:next.open||next.close,
+                        nextClose:next.close,
+                        actualDir,
+                        signalCorrect,
+                        betPlaced:sig.signal!=="NO BET"?"true":"false",
+                        bv:sig._bv||0,
+                        bvD:sig._bvD||0,
+                        rawDir:sig._rawDir||"MIXED",
+                      });
                     }
-                    alert("BACKTEST RESULTS\n"+
-                      "Windows tested: "+(candles.length-50)+"\n"+
-                      "Signals fired: "+signals+"\n"+
-                      "Correct: "+correct+"\n"+
-                      "Win rate: "+(signals>0?Math.round(correct/signals*100):0)+"%\n"+
-                      "P&L ($100/trade): $"+(correct*90-(signals-correct)*100));
+                    const signaled=results.filter(r=>r.betPlaced==="true");
+                    const correct=signaled.filter(r=>r.signalCorrect==="TRUE");
+                    const winRate=signaled.length>0?Math.round(correct.length/signaled.length*100):0;
+                    // Download CSV
+                    const headers=["time","date","signal","confidence","score","trend","openPrice","closePrice","nextClose","actualDir","signalCorrect","betPlaced","bv","bvD","rawDir"];
+                    const rows=results.map(r=>headers.map(h=>r[h]).join(","));
+                    const csv=[headers.join(","),...rows].join("\n");
+                    const blob=new Blob([csv],{type:"text/csv"});
+                    const url=URL.createObjectURL(blob);
+                    const a=document.createElement("a");
+                    a.href=url;a.download=`btc_backtest_${Date.now()}.csv`;a.click();
+                    URL.revokeObjectURL(url);
+                    alert("BACKTEST COMPLETE\nWindows: "+(candles.length-51)+"\nSignals: "+signaled.length+"\nCorrect: "+correct.length+"\nWin rate: "+winRate+"%\nP&L: $"+(correct.length*90-(signaled.length-correct.length)*100)+"\n\nCSV downloaded!");
                   } catch(e){alert("Backtest failed: "+e.message);}
                 }}>
-                RUN BACKTEST
+                RUN BACKTEST + EXPORT CSV
               </button>
             </div>
-            <div style={{background:"#0d1120",border:"1px solid rgba(91,141,238,0.2)",borderRadius:10,padding:15}}>
-              <div style={{fontSize:9,color:"#3a4a6a",letterSpacing:".15em",marginBottom:12}}>TELEGRAM ALERTS</div>
-              <div style={{fontSize:12,color:"#a8b8d8",lineHeight:1.9}}>
+            <div className="card" style={{borderColor:`${BLUE}33`}}>
+              <div style={{fontSize:9,color:FG4,letterSpacing:".15em",marginBottom:12}}>TELEGRAM ALERTS</div>
+              <div style={{fontSize:12,color:FG2,lineHeight:1.9}}>
                 Configured on Railway backend. Fires every minute when signal changes (score 4+).
-                <div style={{marginTop:10,color:"#ffb830"}}>Bot: @MmyyBTCsignal_bot</div>
+                <div style={{marginTop:10,color:AMBER}}>Bot: @MmyyBTCsignal_bot</div>
               </div>
             </div>
           </div>
@@ -958,10 +984,13 @@ reasoning, warnings          — text arrays`}
           </div>
         )}
 
-        <div style={{textAlign:"center",fontSize:9,color:FG4,marginTop:18,letterSpacing:".12em"}}>
+        <div style={{textAlign:"center",fontSize:9,color:FG4,marginTop:18,letterSpacing:".12em",paddingBottom:80}}>
           NOT FINANCIAL ADVICE · EDUCATIONAL TOOL ONLY
         </div>
       </div>
+      <button className="refresh-fab" onClick={()=>refresh(false)} disabled={loading}>
+        {loading ? "⏳ LOADING..." : "↺  REFRESH"}
+      </button>
     </div>
   );
 }
