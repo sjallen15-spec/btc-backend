@@ -4,20 +4,28 @@
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>BTC Decision Engine</title>
-  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
-  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.development.js"></script>
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.development.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
   <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Bebas+Neue&display=swap" rel="stylesheet"/>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: #07090f; color: #e8eeff; font-family: 'DM Mono','Courier New',monospace; }
+    #error-display { display:none; color:#ff4d6a; padding:20px; font-family:monospace; white-space:pre-wrap; }
   </style>
 </head>
 <body>
   <div id="root"></div>
+  <div id="error-display"></div>
+  <script>
+    window.addEventListener('error', function(e) {
+      var d = document.getElementById('error-display');
+      d.style.display = 'block';
+      d.textContent = 'JS Error: ' + e.message + '\nFile: ' + e.filename + '\nLine: ' + e.lineno + '\nCol: ' + e.colno;
+    });
+  </script>
   <script type="text/babel">
 const { useState, useEffect, useCallback, useRef } = React;
-
 
 // ═══════════════════════════════════════════════════════════════
 // CONFIG
@@ -60,11 +68,11 @@ async function loadLog() {
 }
 
 async function saveLog(log) {
-  try { localStorage.setItem(LOG_KEY, JSON.stringify(log)); } catch(e) { console.error("Storage save failed:", e); }
+  try { localStorage.setItem(LOG_KEY, JSON.stringify(log)); } catch(e) { console.error(e); }
 }
 
 async function loadStreak() {
-  try { const v = localStorage.getItem(STREAK_KEY); return v ? JSON.parse(v) : { wins:0, losses:0 }; } catch { return { wins:0, losses:0 }; }
+  try { const v = localStorage.getItem(STREAK_KEY); return v ? JSON.parse(v) : {wins:0,losses:0}; } catch { return {wins:0,losses:0}; }
 }
 
 async function saveStreak(streak) {
@@ -284,9 +292,6 @@ function ScoreBar({label,value,max=2,color}) {
       <div style={{height:4,background:"#0f1525",borderRadius:2}}>
         <div style={{height:"100%",width:`${pct}%`,background:color,borderRadius:2,transition:"width .9s ease"}} />
       </div>
-      <button className="refresh-fab" onClick={()=>refresh(false)} disabled={loading}>
-        {loading ? "⏳ LOADING..." : "↺  REFRESH"}
-      </button>
     </div>
   );
 }
@@ -303,9 +308,6 @@ function WindowProgress({msUntilClose}) {
       <div style={{height:3,background:"#0f1525",borderRadius:2}}>
         <div style={{height:"100%",width:`${pct}%`,background:color,borderRadius:2,transition:"width 1s linear",boxShadow:msUntilClose<60000?`0 0 8px ${RED}99`:"none"}} />
       </div>
-      <button className="refresh-fab" onClick={()=>refresh(false)} disabled={loading}>
-        {loading ? "⏳ LOADING..." : "↺  REFRESH"}
-      </button>
     </div>
   );
 }
@@ -572,8 +574,6 @@ function BTCDecisionEngine() {
         .card-dn{border-color:${RED}44!important;box-shadow:0 0 20px ${RED}0d}
         .btn{background:${CARD};border:1px solid ${BDR};border-radius:6px;color:${FG3};font-family:inherit;font-size:11px;padding:7px 13px;cursor:pointer;letter-spacing:.08em;transition:all .2s}
         .btn:hover{border-color:${FG4};color:${FG}}
-        .refresh-fab{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:100;background:#1a2540;border:1px solid ${GREEN}55;border-radius:50px;color:${GREEN};font-family:inherit;font-size:13px;padding:14px 32px;cursor:pointer;letter-spacing:.1em;box-shadow:0 4px 24px #000a}
-        .refresh-fab:active{transform:translateX(-50%) scale(0.97)}
         .btnW{border-color:${GREEN}55;color:${GREEN}}.btnW:hover{background:${GREEN}12}
         .btnL{border-color:${RED}55;color:${RED}}.btnL:hover{background:${RED}12}
         .tab{background:transparent;border:none;border-bottom:2px solid transparent;color:${FG3};font-family:inherit;font-size:11px;padding:8px 14px;cursor:pointer;letter-spacing:.1em;transition:all .2s}
@@ -611,7 +611,7 @@ function BTCDecisionEngine() {
 
         {/* TABS */}
         <div style={{display:"flex",borderBottom:`1px solid ${BDR}`,marginBottom:14}}>
-          {[["signal","SIGNAL"],["log","TRADE LOG"],["backtest","BACKTEST"],["export","EXPORT DATA"]].map(([id,label])=>(
+          {[["signal","SIGNAL"],["log","TRADE LOG"],["export","EXPORT DATA"]].map(([id,label])=>(
             <button key={id} className={`tab ${tab===id?"active":""}`} onClick={()=>setTab(id)}>{label}
               {id==="log"&&tradeLog.length>0&&<span style={{marginLeft:5,fontSize:9,color:FG4}}>({tradeLog.length})</span>}
             </button>
@@ -849,50 +849,8 @@ function BTCDecisionEngine() {
           </div>
         )}
 
-        {/* BACKTEST TAB */}
-        {tab==="backtest"&&(
-          <div className="fi">
-            <div className="card" style={{marginBottom:12}}>
-              <div style={{fontSize:9,color:FG4,letterSpacing:".15em",marginBottom:8}}>BACKTEST — 15M CANDLES</div>
-              <div style={{fontSize:12,color:FG2,lineHeight:1.7,marginBottom:14}}>
-                Fetches real 15-minute BTC candles and runs the signal engine on each window to check historical accuracy.
-              </div>
-              <button className="btn" style={{color:GREEN,borderColor:`${GREEN}55`,padding:"12px 24px",fontSize:13,width:"100%"}}
-                onClick={async()=>{
-                  setLoadMsg("Running backtest...");setLoading(true);
-                  try {
-                    const r = await fetch(`${API_BASE}/candles?limit=200`);
-                    const candles = await r.json();
-                    let signals=0,correct=0;
-                    for(let i=50;i<candles.length-1;i++){
-                      const slice=candles.slice(0,i+1);
-                      const cur=slice[slice.length-1];
-                      const next=candles[i+1];
-                      const sig=runEngine(slice,cur.open,cur.close,{wins:0,losses:0});
-                      if(sig.signal!=="NO BET"){
-                        signals++;
-                        const actualDir=next.close>cur.close?"UP":"DOWN";
-                        if(sig.signal===actualDir) correct++;
-                      }
-                    }
-                    alert(`Backtest: ${candles.length} candles\nSignals: ${signals}\nCorrect: ${correct}\nWin rate: ${signals>0?Math.round(correct/signals*100):0}%\nP&L: $${correct*90-(signals-correct)*100}`);
-                  } catch(e){alert("Backtest failed: "+e.message);}
-                  finally{setLoading(false);setLoadMsg("");}
-                }}>
-                RUN BACKTEST
-              </button>
-            </div>
-            <div className="card" style={{borderColor:`${BLUE}33`}}>
-              <div style={{fontSize:9,color:FG4,letterSpacing:".15em",marginBottom:12}}>TELEGRAM</div>
-              <div style={{fontSize:12,color:FG2,lineHeight:1.9}}>
-                Telegram notifications are configured on the Railway backend and fire automatically every minute when a signal appears or changes (score 4+).
-                <div style={{marginTop:10,color:AMBER}}>Bot: @MmyyBTCsignal_bot</div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* EXPORT TAB */}
+        {/* ── EXPORT TAB ── */}
+        {tab==="export"&&(
           <div className="fi">
             <div className="card" style={{marginBottom:12}}>
               <div style={{fontSize:9,color:FG4,letterSpacing:".15em",marginBottom:12}}>EXPORT TRADE DATA</div>
@@ -958,16 +916,13 @@ reasoning, warnings          — text arrays`}
           NOT FINANCIAL ADVICE · EDUCATIONAL TOOL ONLY
         </div>
       </div>
-      <button className="refresh-fab" onClick={()=>refresh(false)} disabled={loading}>
-        {loading ? "⏳ LOADING..." : "↺  REFRESH"}
-      </button>
     </div>
   );
 }
 
 
-    const root = ReactDOM.createRoot(document.getElementById('root'));
-    root.render(React.createElement(BTCDecisionEngine));
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(React.createElement(BTCDecisionEngine));
   </script>
 </body>
 </html>
