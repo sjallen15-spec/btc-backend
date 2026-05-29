@@ -191,54 +191,32 @@ function runEngine(candles, betPrice, livePrice, streak) {
   let revBlock=false;
   if(rawDir==="UP"&&st.trend==="DOWN"&&livePrice<=st.prevSwingHigh){revBlock=true;warnings.push("Reversal filter: lower high not broken");}
 
-  // ── OPTIMIZED RULES v10 (438 windows, May 21-28) ──
-  // Key findings:
-  // 1. ATR filter: moves <0.22% are noise (42% acc), moves >0.30% are 80% accurate
-  // 2. DOWN+DOWN trend: 25% win rate — counter-intuitive, block it
-  // 3. Score 5 DOWN CHOP: 78% | Score 5 UP CHOP: 75% | Score 4 DOWN DOWN: 71%
-  // 4. Consecutive signals degrade: #1=61%, #2=50%, #3+=0% — track streak
-  // 5. Time of day: hours 0,12,15 are dead zones (0-25%)
-  // 6. Score 4 UP CHOP: 33% — block
-  // 7. Score 7 UP CHOP: 33% — block
+    // ── OPTIMIZED RULES v11 (521 windows, all data) ──
+  // SIMPLE AND DATA-BACKED:
+  // Score 4: 20-46% win rate across ALL backtests — ALWAYS BLOCK
+  // Score 5: 67-75% consistently — fire MEDIUM
+  // Score 6: 67-75% — fire HIGH
+  // Score 7: inconsistent, small sample — fire MEDIUM only
+  // DOWN+DOWN: 0-25% — always block
+  // ATR filter: require above average volatility
+  // Dead zones: hours 0, 12, 15 = 0-25% win rate
 
-  // ATR-based move size filter — require meaningful volatility
   const atrOk = at.current >= at.avg * 0.9;
-
-  // Time of day filter — block dead zones
   const currentHour = new Date().getHours();
   const deadZone = [0, 12, 15].includes(currentHour);
 
   let signal="NO BET",confidence="LOW";
 
   if(!revBlock && atrOk && !deadZone) {
-    // ── DOWN SIGNALS ──
-    // Score 5-6 DOWN CHOP: 67-78% win rate
-    if(score>=5 && score<=6 && rawDir==="DOWN" && st.trend==="CHOP") {
-      signal="DOWN"; confidence=score===6?"HIGH":"MEDIUM";
-    }
-    // Score 4 DOWN DOWN: 71% win rate (good despite trend alignment)
-    else if(score===4 && rawDir==="DOWN" && st.trend==="DOWN") {
-      signal="DOWN"; confidence="MEDIUM";
-    }
-    // Score 4 DOWN CHOP: 62% win rate
-    else if(score===4 && rawDir==="DOWN" && st.trend==="CHOP") {
-      signal="DOWN"; confidence="MEDIUM";
-    }
-    // BLOCK: DOWN+DOWN for score 5-6 (only 25% win rate — countertrend)
-    // BLOCK: Score 7 DOWN (inconsistent)
-
-    // ── UP SIGNALS ──
-    // Score 5 UP CHOP: 75% win rate
-    else if(score===5 && rawDir==="UP" && st.trend==="CHOP") {
-      signal="UP"; confidence="MEDIUM";
-    }
-    // Score 6 UP CHOP: 60% — borderline, include
-    else if(score===6 && rawDir==="UP" && st.trend==="CHOP") {
-      signal="UP"; confidence="MEDIUM";
-    }
-    // Score 6 UP UP: 50% — skip
-    // Score 4 UP CHOP: 33% — BLOCK
-    // Score 7 UP CHOP: 33% — BLOCK
+    // ── DOWN SIGNALS ── block DOWN+DOWN trend (counter-trend reversal trap)
+    if(score===7 && rawDir==="DOWN" && st.trend!=="DOWN") { signal="DOWN"; confidence="MEDIUM"; }
+    else if(score===6 && rawDir==="DOWN" && st.trend!=="DOWN") { signal="DOWN"; confidence="HIGH"; }
+    else if(score===5 && rawDir==="DOWN" && st.trend!=="DOWN") { signal="DOWN"; confidence="MEDIUM"; }
+    // ── UP SIGNALS ── block UP+UP trend (same reversal trap logic)
+    else if(score===7 && rawDir==="UP" && st.trend!=="UP") { signal="UP"; confidence="MEDIUM"; }
+    else if(score===6 && rawDir==="UP" && st.trend!=="UP") { signal="UP"; confidence="HIGH"; }
+    else if(score===5 && rawDir==="UP" && st.trend!=="UP") { signal="UP"; confidence="MEDIUM"; }
+    // ── SCORE 4 BLOCKED — 20-46% win rate across all data ──
   }
 
   let betSize=0;

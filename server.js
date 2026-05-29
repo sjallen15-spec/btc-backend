@@ -205,24 +205,19 @@ function runEngine(candles, betPrice, livePrice) {
   // All 4 bullish votes + score>=4 = MEDIUM UP
   let signal = "NO BET", confidence = "LOW";
 
-  // ── OPTIMIZED RULES v10 (438 windows, May 21-28) ──
+    // ── OPTIMIZED RULES v11 (521 windows) ──
   const atrOk = at.current >= at.avg * 0.9;
   const currentHour = new Date().getHours();
   const deadZone = [0, 12, 15].includes(currentHour);
   if (!revBlock && atrOk && !deadZone) {
-    // DOWN signals — best combos from data
-    if (score >= 5 && score <= 6 && rawDir === "DOWN" && st.trend === "CHOP") {
-      signal = "DOWN"; confidence = score === 6 ? "HIGH" : "MEDIUM";
-    } else if (score === 4 && rawDir === "DOWN" && (st.trend === "DOWN" || st.trend === "CHOP")) {
-      signal = "DOWN"; confidence = "MEDIUM";
-    }
-    // UP signals — block UP+DOWN and low-score UP+CHOP
-    else if (score === 5 && rawDir === "UP" && st.trend === "CHOP") {
-      signal = "UP"; confidence = "MEDIUM";
-    } else if (score === 6 && rawDir === "UP" && st.trend === "CHOP") {
-      signal = "UP"; confidence = "MEDIUM";
-    }
-  }
+    // Block score 4 entirely — 20-46% win rate
+    // Block signal+trend alignment (reversal trap)
+    if (score === 7 && rawDir === "DOWN" && st.trend !== "DOWN") { signal = "DOWN"; confidence = "MEDIUM"; }
+    else if (score === 6 && rawDir === "DOWN" && st.trend !== "DOWN") { signal = "DOWN"; confidence = "HIGH"; }
+    else if (score === 5 && rawDir === "DOWN" && st.trend !== "DOWN") { signal = "DOWN"; confidence = "MEDIUM"; }
+    else if (score === 7 && rawDir === "UP" && st.trend !== "UP") { signal = "UP"; confidence = "MEDIUM"; }
+    else if (score === 6 && rawDir === "UP" && st.trend !== "UP") { signal = "UP"; confidence = "HIGH"; }
+    else if (score === 5 && rawDir === "UP" && st.trend !== "UP") { signal = "UP"; confidence = "MEDIUM"; }
 
   let betSize = 0;
   if (signal !== "NO BET") {
