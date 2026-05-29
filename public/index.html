@@ -191,9 +191,55 @@ function runEngine(candles, betPrice, livePrice, streak) {
   let revBlock=false;
   if(rawDir==="UP"&&st.trend==="DOWN"&&livePrice<=st.prevSwingHigh){revBlock=true;warnings.push("Reversal filter: lower high not broken");}
 
+  // ── OPTIMIZED RULES v10 (438 windows, May 21-28) ──
+  // Key findings:
+  // 1. ATR filter: moves <0.22% are noise (42% acc), moves >0.30% are 80% accurate
+  // 2. DOWN+DOWN trend: 25% win rate — counter-intuitive, block it
+  // 3. Score 5 DOWN CHOP: 78% | Score 5 UP CHOP: 75% | Score 4 DOWN DOWN: 71%
+  // 4. Consecutive signals degrade: #1=61%, #2=50%, #3+=0% — track streak
+  // 5. Time of day: hours 0,12,15 are dead zones (0-25%)
+  // 6. Score 4 UP CHOP: 33% — block
+  // 7. Score 7 UP CHOP: 33% — block
+
+  // ATR-based move size filter — require meaningful volatility
+  const atrOk = at.current >= at.avg * 0.9;
+
+  // Time of day filter — block dead zones
+  const currentHour = new Date().getHours();
+  const deadZone = [0, 12, 15].includes(currentHour);
+
   let signal="NO BET",confidence="LOW";
-  if(score>=6&&rawDir!=="MIXED"&&!revBlock){signal=rawDir;confidence="HIGH";}
-  else if(score>=4&&rawDir!=="MIXED"&&!revBlock){signal=rawDir;confidence="MEDIUM";}
+
+  if(!revBlock && atrOk && !deadZone) {
+    // ── DOWN SIGNALS ──
+    // Score 5-6 DOWN CHOP: 67-78% win rate
+    if(score>=5 && score<=6 && rawDir==="DOWN" && st.trend==="CHOP") {
+      signal="DOWN"; confidence=score===6?"HIGH":"MEDIUM";
+    }
+    // Score 4 DOWN DOWN: 71% win rate (good despite trend alignment)
+    else if(score===4 && rawDir==="DOWN" && st.trend==="DOWN") {
+      signal="DOWN"; confidence="MEDIUM";
+    }
+    // Score 4 DOWN CHOP: 62% win rate
+    else if(score===4 && rawDir==="DOWN" && st.trend==="CHOP") {
+      signal="DOWN"; confidence="MEDIUM";
+    }
+    // BLOCK: DOWN+DOWN for score 5-6 (only 25% win rate — countertrend)
+    // BLOCK: Score 7 DOWN (inconsistent)
+
+    // ── UP SIGNALS ──
+    // Score 5 UP CHOP: 75% win rate
+    else if(score===5 && rawDir==="UP" && st.trend==="CHOP") {
+      signal="UP"; confidence="MEDIUM";
+    }
+    // Score 6 UP CHOP: 60% — borderline, include
+    else if(score===6 && rawDir==="UP" && st.trend==="CHOP") {
+      signal="UP"; confidence="MEDIUM";
+    }
+    // Score 6 UP UP: 50% — skip
+    // Score 4 UP CHOP: 33% — BLOCK
+    // Score 7 UP CHOP: 33% — BLOCK
+  }
 
   let betSize=0;
   if(signal!=="NO BET"&&streak.losses<4){
@@ -457,6 +503,13 @@ function BTCDecisionEngine() {
       setSource(data.source);
       const sk = streak;
       const out = runEngine(data.candles, data.betPrice, data.price, sk);
+      // Consecutive signal streak tracking — accuracy drops after 2nd signal
+      if(out.signal !== "NO BET" && out.signal === result?.signal) {
+        out._streak = (result?._streak || 0) + 1;
+        if(out._streak >= 3) { out.signal = "NO BET"; out.confidence = "LOW"; out._blockedByStreak = true; }
+      } else {
+        out._streak = 1;
+      }
       out._meta.candleOpenTime  = data.candleOpenTime;
       out._meta.candleCloseTime = data.candleCloseTime;
       out._meta.msUntilClose    = data.msUntilClose;

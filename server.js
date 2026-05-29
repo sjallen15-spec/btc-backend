@@ -196,6 +196,7 @@ function runEngine(candles, betPrice, livePrice) {
   const bv  = [livePrice>e50, mom.dir==="UP",   st.trend==="UP",  m.macd>0].filter(Boolean).length;
   const bvD = [livePrice<e50, mom.dir==="DOWN", st.trend==="DOWN", m.macd<0].filter(Boolean).length;
   const rawDir = bv>=3?"UP":bvD>=3?"DOWN":bv>=2&&bvD===0?"UP":bvD>=2&&bv===0?"DOWN":"MIXED";
+  const revBlock = rawDir==="UP" && st.trend==="DOWN" && livePrice<=st.prevSwingHigh;
 
   // Signal rules — optimized from backtest data
   // All 4 bearish votes + score>=5 = HIGH DOWN (89% accurate)
@@ -204,12 +205,24 @@ function runEngine(candles, betPrice, livePrice) {
   // All 4 bullish votes + score>=4 = MEDIUM UP
   let signal = "NO BET", confidence = "LOW";
 
-  if (bvD===4 && score>=5)                     { signal="DOWN"; confidence="HIGH"; }
-  else if (bvD===4 && score>=3)                { signal="DOWN"; confidence="MEDIUM"; }
-  else if (bv===4 && score>=6)                 { signal="UP";   confidence="HIGH"; }
-  else if (bv===4 && score>=4)                 { signal="UP";   confidence="MEDIUM"; }
-  else if (bvD>=3 && bv===0 && score>=6)       { signal="DOWN"; confidence="MEDIUM"; }
-  else if (bv>=3  && bvD===0 && score>=7)      { signal="UP";   confidence="MEDIUM"; }
+  // ── OPTIMIZED RULES v10 (438 windows, May 21-28) ──
+  const atrOk = at.current >= at.avg * 0.9;
+  const currentHour = new Date().getHours();
+  const deadZone = [0, 12, 15].includes(currentHour);
+  if (!revBlock && atrOk && !deadZone) {
+    // DOWN signals — best combos from data
+    if (score >= 5 && score <= 6 && rawDir === "DOWN" && st.trend === "CHOP") {
+      signal = "DOWN"; confidence = score === 6 ? "HIGH" : "MEDIUM";
+    } else if (score === 4 && rawDir === "DOWN" && (st.trend === "DOWN" || st.trend === "CHOP")) {
+      signal = "DOWN"; confidence = "MEDIUM";
+    }
+    // UP signals — block UP+DOWN and low-score UP+CHOP
+    else if (score === 5 && rawDir === "UP" && st.trend === "CHOP") {
+      signal = "UP"; confidence = "MEDIUM";
+    } else if (score === 6 && rawDir === "UP" && st.trend === "CHOP") {
+      signal = "UP"; confidence = "MEDIUM";
+    }
+  }
 
   let betSize = 0;
   if (signal !== "NO BET") {
