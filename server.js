@@ -218,6 +218,7 @@ function runEngine(candles, betPrice, livePrice) {
     else if (score === 7 && rawDir === "UP" && st.trend !== "UP") { signal = "UP"; confidence = "MEDIUM"; }
     else if (score === 6 && rawDir === "UP" && st.trend !== "UP") { signal = "UP"; confidence = "HIGH"; }
     else if (score === 5 && rawDir === "UP" && st.trend !== "UP") { signal = "UP"; confidence = "MEDIUM"; }
+  }
 
   let betSize = 0;
   if (signal !== "NO BET") {
